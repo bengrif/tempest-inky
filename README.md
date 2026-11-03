@@ -23,7 +23,7 @@ Two columns split by a rule at x=362, with fixed geometry — nothing moves betw
 | **NEXT** (160 px) | The single highest-priority thing worth knowing — an official alert, lightning, rain starting, gusts, frost, or station trouble — in sentence case, over a sub-line of qualifying figures, over the next four hours. When nothing needs flagging it shows the current condition instead, such as `Partly cloudy`, and keeps its height either way. The exact temperature lives on the sub-line, since the hero rounds. |
 | **LATER** (152 px) | Five days: name, condition glyph, a 12 px temperature bar and the high. Bar *length* is relative to that week's own range, so it shows the week's shape; bar *fill* is absolute — blue below 0 °C, green to 9, white to 19, then yellow, orange and red — so it shows the week's level. There is no key: the high is printed beside every bar, so the panel teaches its own scale. |
 
-Times are always absolute. The panel can be 15 minutes stale, so "in 3h 25m" is wrong for 14 of every 15 minutes; `18:00` never is.
+Times are always absolute. The panel only repaints when the temperature changes, so it can be hours old, and "in 3h 25m" would be wrong for nearly all of that time; `18:00` never is.
 
 ---
 
@@ -35,7 +35,7 @@ The panel shows metric by default. For Fahrenheit and other imperial units, add 
 UNITS = "imperial"       # or "metric", the default
 ```
 
-or set the `TEMPEST_UNITS` environment variable, which takes precedence. The next refresh picks it up.
+or set the `TEMPEST_UNITS` environment variable, which takes precedence. The next refresh picks it up — switching units changes the temperature as displayed, so it repaints straight away.
 
 | Measure | Metric | Imperial |
 |---------|--------|----------|
@@ -83,7 +83,7 @@ No alert active for this location right now.
 
 That is a working setup — `Region: ca` means the feed is wired up and there is simply nothing to warn about. If it prints `Region: none`, or the wrong country, follow the steps for your region below.
 
-All settings go in `~/secrets.py`, alongside your station ID and token. Restart nothing — the next refresh picks them up.
+All settings go in `~/secrets.py`, alongside your station ID and token. Restart nothing — the next refresh picks them up, though the panel only repaints once the temperature changes. Run `venv/bin/python3 main.py --force` to see a change straight away.
 
 #### 🇨🇦 Canada — Environment Canada
 
@@ -260,7 +260,7 @@ The installer will:
 sudo reboot
 ```
 
-The display will update automatically ~2 minutes after boot, then every 15 minutes — more often when rain is likely within the hour, less often overnight.
+The display will update automatically ~2 minutes after boot. After that it checks the weather every 15 minutes — more often when rain is likely within the hour, less often overnight — and repaints only when the temperature it shows has changed.
 
 ---
 
@@ -269,7 +269,8 @@ The display will update automatically ~2 minutes after boot, then every 15 minut
 | Feature | Detail |
 |---------|--------|
 | **Refresh schedule** | Adaptive: every 15 min normally, 10 min when rain is likely in the next hour, 30 min overnight (22:00–06:00). The timer ticks every 5 min and `main.py` decides whether a tick is due. |
-| **Stale data** | If a fetch fails, the last good reading is redrawn with a `STALE` marker instead of wiping the panel |
+| **Repaints** | Only when the current temperature, as displayed, has changed — `21.8°` to `21.9°` is still `22°` and leaves the panel alone. Everything else on the panel, alerts included, updates at the next repaint. `--force` always repaints |
+| **Failed fetch** | Leaves the panel exactly as it is and retries on the next 5-minute tick. The `UPDATED` cell shows when the figures on the panel were fetched |
 | **Weather alerts** | One extra request to Environment Canada, the NWS or the Met Office, picked from your station's location. A failure here is always "no alert" and never affects the weather |
 | **Virtual environment** | Self-contained; immune to system Python upgrades |
 | **Network resilience** | Waits up to 2 minutes for WiFi before fetching |
@@ -292,7 +293,7 @@ journalctl -u tempest-inky.service -n 50
 # Run one tick now (skips if a refresh isn't due yet; check the logs)
 sudo systemctl start tempest-inky.service
 
-# Force an immediate repaint, ignoring the schedule
+# Force an immediate repaint, ignoring the schedule and the temperature check
 cd ~/tempest-inky && venv/bin/python3 main.py --force
 
 # Stop automatic refreshes
@@ -327,7 +328,7 @@ bash install.sh
 
 ### Display shows "DATA FETCH ERROR"
 
-This appears only when a fetch fails **and** there is no cached reading to fall back on — normally a failed fetch redraws the last good data with a `STALE` marker instead. Your API credentials may be wrong, or the Pi has no internet. Check:
+This appears only when a fetch fails **and** the panel has never shown any weather — once it has, a failed fetch leaves the last paint in place. Your API credentials may be wrong, or the Pi has no internet. Check:
 ```bash
 # Test connectivity
 curl -s "https://swd.weatherflow.com/swd/rest/observations/station/YOUR_ID?token=YOUR_TOKEN" | python3 -m json.tool | head -20
@@ -380,7 +381,7 @@ cd ~/tempest-inky
 venv/bin/python3 main.py --force
 ```
 
-`--force` renders immediately, ignoring the adaptive schedule. Without it, a run that is not yet due exits straight away without fetching or repainting.
+`--force` renders immediately, ignoring the adaptive schedule and repainting even if the temperature has not changed. Without it, a run that is not yet due exits straight away without fetching, and a run whose temperature matches the panel fetches but does not repaint.
 
 ```bash
 venv/bin/python3 main.py --check-alerts

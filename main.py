@@ -147,10 +147,10 @@ UNIT_SYSTEMS = ("metric", "imperial")
 def load_units():
     """Display units: "metric" (the default) or "imperial".
 
-    Env wins over secrets.py. This only changes what is printed: the API is
-    always asked for metric, and every threshold, temperature band, cache
-    and scenario stays in metric, so switching units can never move a
-    threshold or mix two unit systems in one cached payload.
+    Env wins over secrets.py. This only changes what is printed: the
+    payload stays metric, and every threshold, temperature band and
+    scenario stays in metric, so switching units can never move a
+    threshold.
     """
     module = get_secrets()
     raw = (
@@ -781,6 +781,11 @@ def save_state(state):
     save_json(STATE_FILE, state)
 
 
+# What state["displayed"] holds while the panel shows the error screen
+# rather than a temperature. Never equal to a formatted temperature.
+DISPLAYED_ERROR = "error"
+
+
 def current_boot_id():
     """The kernel's ID for this boot, or None off Linux.
 
@@ -1232,9 +1237,9 @@ def fetch_station_location(session):
 def fetch_weather(retries=3):
     """Fetch from the Tempest API with exponential-backoff retry.
 
-    The payload is always metric, whatever UNITS says, so the cache and
-    every threshold share one unit system, and the fmt_* helpers convert to
-    imperial at the moment of printing. The one exception on the wire is
+    The payload is always metric, whatever UNITS says, so every threshold
+    shares one unit system, and the fmt_* helpers convert to imperial at
+    the moment of printing. The one exception on the wire is
     the forecast, which is fetched in Fahrenheit for an imperial panel and
     converted to Celsius here; see forecast_unit_params.
     """
@@ -1357,31 +1362,22 @@ def fetch_weather(retries=3):
 
 
 def fetch_all():
-    """Weather plus alerts, with the cache fallbacks both need.
+    """Weather plus alerts, or None when the weather could not be fetched.
 
     Shared by the panel and the desktop preview so the two render the same
     thing. The weather is authoritative for the panel; the alert is added
-    when it exists and silently skipped when it does not.
+    when it exists and silently skipped when it does not. There is no
+    fallback to an older reading: on the panel a failed fetch simply leaves
+    the last paint in place.
     """
-    state = load_state()
-
     weather = fetch_weather()
-    if weather:
-        state["payload"] = weather
-    else:
-        cached = state.get("payload")
-        if cached:
-            # 20-minute-old weather beats an error screen.
-            print("Fetch failed — rendering cached payload as stale.")
-            weather = dict(cached)
-            weather["stale"] = True
-        else:
-            print("Fetch failed and no cache available — error screen.")
+    if weather is None:
+        return None
 
     location = load_location_config()
-    lat = location["lat"] if location["lat"] is not None else (weather or {}).get("lat")
-    lon = location["lon"] if location["lon"] is not None else (weather or {}).get("lon")
-    tz_name = (weather or {}).get("timezone")
+    lat = location["lat"] if location["lat"] is not None else weather.get("lat")
+    lon = location["lon"] if location["lon"] is not None else weather.get("lon")
+    tz_name = weather.get("timezone")
 
     region = location["region"]
     if region == "auto":
@@ -1389,12 +1385,7 @@ def fetch_all():
         if region is None:
             print("No alert provider for this location — alerts disabled.")
 
-    if weather is not None:
-        weather["alert"] = resolve_alert(region, lat, lon, location["area"])
-
-    if weather:
-        state["payload"] = {k: v for k, v in weather.items() if k != "stale"}
-    save_state(state)
+    weather["alert"] = resolve_alert(region, lat, lon, location["area"])
     return weather
 
 
@@ -1434,10 +1425,9 @@ def select_concern(weather):
 
     # 2. Station health. No ambient state: it appears here or not at all.
     obs_time = weather.get("obs_time")
-    # Measured against when the data was fetched, not the wall clock. A
-    # stale payload is our outage, not the station's, and the sub-line
-    # already says STALE; and a --scenario render, whose observation time
-    # is pinned to 15:30, stays that scenario at any hour of the day.
+    # Measured against when the data was fetched, not the wall clock, so a
+    # --scenario render, whose observation time is pinned to 15:30, stays
+    # that scenario at any hour of the day.
     reference = weather.get("fetched_at") or time.time()
     if obs_time and (reference - obs_time) > STATION_SILENT_SECONDS:
         silent_for = int((reference - obs_time) / 60)
@@ -1526,8 +1516,9 @@ def select_concern(weather):
 def precip_transition(weather):
     """Precipitation starting or stopping inside the next three hours.
 
-    Times are printed absolutely. The panel is up to 15 minutes stale, so
-    "in 3h 25m" is wrong for 14 of every 15 minutes; `18:00` never is.
+    Times are printed absolutely. The panel only repaints when the
+    temperature changes, so it can be hours old, and "in 3h 25m" would be
+    wrong for nearly all of that time; `18:00` never is.
     """
     hours = [h for h in weather.get("hourly", [])[:4] if h.get("prob") is not None]
     if len(hours) < 2:
@@ -1775,11 +1766,11 @@ def metric_values(weather):
     wide and a value with its unit beside `13h 56m` collides; that was
     measured, not preferred.
 
-    UPDATED is when the payload was fetched, not when the panel last
-    painted. A failed fetch redraws the cached payload with its own
-    fetched_at, so this cell shows how old the figures are, which a paint
-    time would hide. The NEXT zone separately flags a station that has
-    stopped reporting.
+    UPDATED is when the figures on the panel were fetched. The panel only
+    repaints when the displayed temperature changes, so this is also the
+    last time it changed: an old time with a correct temperature means the
+    temperature has held, not that the panel has stopped. The NEXT zone
+    separately flags a station that has stopped reporting.
     """
     sunrise, sunset = weather.get("sunrise"), weather.get("sunset")
     if sunrise and sunset and sunset > sunrise:
@@ -1868,10 +1859,7 @@ def draw_next(draw, weather):
     )
     y += NEXT_TITLE_H + NEXT_SUB_GAP
 
-    # Sub-line. A stale render says so here and keeps its weather.
     clauses = list(concern["clauses"])
-    if weather.get("stale"):
-        clauses.insert(0, f"STALE {MIDDOT} {hhmm(weather.get('fetched_at'))}")
     sub_font = regular(SIZE_LABEL)
     sub_line = fit_clauses(clauses, sub_font, RIGHT_X1 - RIGHT_X0)
     draw_row(draw, RIGHT_X0, y + NEXT_SUB_H / 2, sub_line, sub_font, ref="H")
@@ -2363,6 +2351,30 @@ def main():
         print("Fetching weather...")
         weather = fetch_all()
 
+    if not render_only:
+        state = load_state()
+        state.pop("payload", None)      # the old stale-render cache; unused
+        shown = state.get("displayed")
+        if weather is None:
+            # A failed fetch never touches the panel: whatever it shows is
+            # left alone, and the schedule stays put so the next tick
+            # retries. The error screen is only for a panel that has never
+            # shown anything, and is painted once, not every tick.
+            if shown is not None:
+                print("Fetch failed — leaving the panel as it is.")
+                save_state(state)
+                return
+            displayed = DISPLAYED_ERROR
+        else:
+            displayed = fmt_temp(weather.get("temp"))
+            if not args.force and displayed == shown:
+                print(f"Temperature still {displayed} — not repainting "
+                      f"(use --force to override).")
+                state["next_due"] = time.time() + refresh_interval_minutes(weather) * 60
+                state["boot_id"] = boot_id
+                save_state(state)
+                return
+
     img = quantize_for_inky(create_dashboard(weather, theme_name="inky"))
 
     if args.preview:
@@ -2383,13 +2395,17 @@ def main():
         img.save(args.output)
         print(f"Saved {args.output}")
 
-    # The schedule only moves on once the panel has actually been painted.
-    # Advancing it before the push meant one failed write cost a whole
-    # 10-30 minute interval before the next attempt.
+    # The schedule and the displayed temperature only move on once the panel
+    # has actually been painted. Advancing them before the push meant one
+    # failed write cost a whole 10-30 minute interval before the next
+    # attempt, or worse, that the panel was believed to show a temperature
+    # it never received. An error screen leaves the schedule alone so the
+    # next tick retries.
     if not render_only:
-        state = load_state()
-        state["next_due"] = time.time() + refresh_interval_minutes(weather) * 60
-        state["boot_id"] = boot_id
+        state["displayed"] = displayed
+        if weather is not None:
+            state["next_due"] = time.time() + refresh_interval_minutes(weather) * 60
+            state["boot_id"] = boot_id
         save_state(state)
 
 
