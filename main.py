@@ -304,25 +304,30 @@ TRACK_HEADLINE = -0.01 * SIZE_HEADLINE
 TRACK_VALUE = -0.02        # em, applied per size to the tier-2 numerals
 
 # ── Left column: NOW (x 0-361, full height) ───────────────────────────────────
-# padding 26 vertical / 24 horizontal, content vertically centred as one
-# block. Every box height below is the design's, so the block sums to a
-# fixed 416 and the centring cannot drift when a value changes width.
+# padding 18 vertical / 24 horizontal, content vertically centred as one
+# block. Every box height below is fixed, so the block sums to a fixed 444
+# and the centring cannot drift when a value changes width.
+#
+# Three rows under the rule — FEELS, TODAY (the forecast) and SO FAR (what
+# the station has measured since midnight) — paid for by tightening the
+# space around the rule and between the rows, not by shrinking any type.
 
-NOW_PAD_Y = 26
+NOW_PAD_Y = 18
 NOW_GLYPH_BOX = 108
 NOW_TEMP_BOX = 136          # 172 px at line-height 0.78
 NOW_TEMP_GAP = 10
-NOW_RULE_ABOVE = 32
-NOW_RULE_BELOW = 22
-NOW_ROW_H = 46              # FEELS and TODAY rows
-NOW_ROW_GAP = 14
+NOW_RULE_ABOVE = 20
+NOW_RULE_BELOW = 14
+NOW_ROW_H = 46              # FEELS, TODAY and SO FAR rows
+NOW_ROW_GAP = 8
+NOW_ROWS = 3
 NOW_LABEL_COL = 96          # fixed label column: values start at x=120
 NOW_SLASH_MARGIN = 10
 
 NOW_BLOCK_H = (
     NOW_GLYPH_BOX + NOW_TEMP_GAP + NOW_TEMP_BOX
     + NOW_RULE_ABOVE + RULE_INNER + NOW_RULE_BELOW
-    + NOW_ROW_H + NOW_ROW_GAP + NOW_ROW_H
+    + NOW_ROWS * NOW_ROW_H + (NOW_ROWS - 1) * NOW_ROW_GAP
 )
 assert NOW_BLOCK_H + 2 * NOW_PAD_Y <= HEIGHT, "left column block does not fit"
 
@@ -952,6 +957,143 @@ def fetch_weather(retries=3):
     return None
 
 
+# ── Today's measured range ────────────────────────────────────────────────────
+# The station endpoint carries only the latest reading, and the forecast's
+# high and low are predictions. What the station has actually measured
+# since midnight comes from the device's minute-by-minute history, read
+# incrementally: each poll fetches only the minutes since the last one, and
+# the running high and low live in the state file.
+
+TEMPEST_DEVICE_TYPE = "ST"
+HUB_DEVICE_TYPE = "HB"
+OBS_ST_EPOCH = 0            # obs_st row layout, from the Tempest API docs
+OBS_ST_AIR_TEMP = 7         # always Celsius; the device endpoint has no units
+# Re-read a little before the last minute seen, in case a reading reached
+# the server late. High and low are unaffected by seeing a reading twice.
+HISTORY_OVERLAP_SECONDS = 600
+
+
+class WrongDeviceType(ValueError):
+    """The cached device ID did not return Tempest (obs_st) readings."""
+
+
+def local_midnight(epoch):
+    t = time.localtime(epoch)
+    return time.mktime((t.tm_year, t.tm_mon, t.tm_mday, 0, 0, 0, 0, 0, -1))
+
+
+def find_tempest_device(session):
+    """The Tempest sensor's device ID, from the station's device list.
+
+    The device type code is not in the published API spec. Tempest sensors
+    report "ST" and hubs "HB", so "ST" is preferred and otherwise any
+    active device that is not the hub is tried; fetch_device_temps then
+    checks that what comes back really is Tempest data.
+    """
+    response = session.get(
+        f"{API_BASE_URL}/stations/{STATION_ID}",
+        params={"token": TOKEN},
+        timeout=HTTP_TIMEOUT,
+    )
+    response.raise_for_status()
+    body = response.json()
+    # The spec calls this list "locations"; live responses use "stations".
+    stations = body.get("stations") or body.get("locations") or []
+    devices = [
+        device
+        for station in stations
+        for device in station.get("devices") or []
+        # Only a device with a serial number still sends observations.
+        if device.get("device_id") and device.get("serial_number")
+    ]
+    for device in devices:
+        if device.get("device_type") == TEMPEST_DEVICE_TYPE:
+            return device["device_id"]
+    for device in devices:
+        if device.get("device_type") != HUB_DEVICE_TYPE:
+            return device["device_id"]
+    raise ValueError("no Tempest device found on this station")
+
+
+def fetch_device_temps(session, device_id, start, end):
+    """(epoch, °C) for every minute the device reported between start and end."""
+    response = session.get(
+        f"{API_BASE_URL}/observations/device/{device_id}",
+        params={"token": TOKEN, "time_start": int(start), "time_end": int(end)},
+        timeout=HTTP_TIMEOUT,
+    )
+    response.raise_for_status()
+    body = response.json()
+    if body.get("type") not in (None, "obs_st"):
+        raise WrongDeviceType(f"device {device_id} returned {body.get('type')}")
+    readings = []
+    for row in body.get("obs") or []:
+        if not isinstance(row, list) or len(row) <= OBS_ST_AIR_TEMP:
+            continue
+        epoch, temp = _num(row[OBS_ST_EPOCH]), _num(row[OBS_ST_AIR_TEMP])
+        if epoch is not None and temp is not None:
+            readings.append((epoch, temp))
+    return readings
+
+
+def update_measured_range(weather, state):
+    """Fold the minutes since the last poll into today's high and low.
+
+    A failure here never touches the weather: the range keeps what it had,
+    and because `through` only advances on readings actually received, the
+    next successful poll backfills whatever was missed — including a Pi
+    that was switched off for part of the day.
+    """
+    now = time.time()
+    midnight = local_midnight(now)
+    day = time.strftime("%Y-%m-%d", time.localtime(now))
+
+    measured = state.get("measured")
+    if (
+        not isinstance(measured, dict)
+        or measured.get("day") != day
+        or measured.get("station") != STATION_ID
+    ):
+        measured = {
+            "day": day, "station": STATION_ID,
+            "high": None, "low": None, "through": midnight,
+        }
+
+    def include(temp):
+        if measured["high"] is None or temp > measured["high"]:
+            measured["high"] = temp
+        if measured["low"] is None or temp < measured["low"]:
+            measured["low"] = temp
+
+    session = requests.Session()
+    device_id = state.get("device_id") if state.get("device_station") == STATION_ID else None
+    try:
+        if device_id is None:
+            device_id = find_tempest_device(session)
+            state["device_id"], state["device_station"] = device_id, STATION_ID
+        start = max(midnight, measured["through"] - HISTORY_OVERLAP_SECONDS)
+        for epoch, temp in fetch_device_temps(session, device_id, start, now):
+            if epoch >= midnight:
+                include(temp)
+                measured["through"] = max(measured["through"], epoch)
+    except WrongDeviceType as e:
+        print(f"{e} — will look the device up again next time.")
+        state.pop("device_id", None)
+    except Exception as e:
+        print(f"Could not read today's history: {e} — keeping the range so far.")
+
+    # The latest reading counts too, so the hero can never sit outside the
+    # range printed beneath it. It does not move `through`: only history
+    # does, so a gap in the history is still backfilled later.
+    obs_time = weather.get("obs_time")
+    if weather.get("temp") is not None and obs_time and obs_time >= midnight:
+        include(weather["temp"])
+
+    state["measured"] = measured
+    weather["measured_high"] = measured["high"]
+    weather["measured_low"] = measured["low"]
+
+
 def fetch_all():
     """The weather, or None when it could not be fetched.
 
@@ -959,7 +1101,13 @@ def fetch_all():
     thing. There is no fallback to an older reading: on the panel a failed
     fetch simply leaves the last paint in place.
     """
-    return fetch_weather()
+    weather = fetch_weather()
+    if weather is None:
+        return None
+    state = load_state()
+    update_measured_range(weather, state)
+    save_state(state)
+    return weather
 
 
 # ── The NEXT zone's content ───────────────────────────────────────────────────
@@ -1217,8 +1365,8 @@ def draw_now(draw, weather):
     """Condition glyph, temperature and today's range, black on white."""
     draw.rectangle([COLUMN_X, 0, COLUMN_X + RULE_ZONE - 1, HEIGHT - 1], fill=BLACK)
 
-    # The block is a fixed 416 px tall whatever the values are, so nothing
-    # below it moves when a digit is added.
+    # The block is a fixed height whatever the values are, so nothing below
+    # it moves when a digit is added.
     y = NOW_PAD_Y + (HEIGHT - 2 * NOW_PAD_Y - NOW_BLOCK_H) / 2
 
     glyph = condition_glyph(weather.get("icon_name"), is_night(weather))
@@ -1258,32 +1406,38 @@ def draw_now(draw, weather):
     )
     y += RULE_INNER + NOW_RULE_BELOW
 
-    # Two rows on fixed label columns, each label sharing its value's real
-    # baseline — the values start on the same vertical at x=120.
+    # Three rows on fixed label columns, each label sharing its value's real
+    # baseline — the values start on the same vertical at x=120. TODAY is
+    # Tempest's forecast for the day; SO FAR is what the station has
+    # actually measured since local midnight.
+    rows = [
+        ("FEELS", [weather.get("feels_like")]),
+        ("TODAY", [weather.get("today_high"), weather.get("today_low")]),
+        ("SO FAR", [weather.get("measured_high"), weather.get("measured_low")]),
+    ]
+    assert len(rows) == NOW_ROWS
+    for label, values in rows:
+        draw_now_row(draw, y, label, values)
+        y += NOW_ROW_H + NOW_ROW_GAP
+
+
+def draw_now_row(draw, y, label, values):
+    """A label, then one value or a high / low pair, on a shared baseline."""
     value_font = semibold(SIZE_HILO)
-    label_font = regular(SIZE_LABEL)
     track_value = TRACK_VALUE * SIZE_HILO
-    value_x = LEFT_X0 + NOW_LABEL_COL
-
-    baseline = baseline_for(draw, "0", value_font, y + NOW_ROW_H / 2)
-    draw_text(draw, LEFT_X0, baseline, "FEELS", label_font, TRACK_LABEL)
-    draw_text(
-        draw, value_x, baseline, fmt_temp(weather.get("feels_like")),
-        value_font, track_value,
-    )
-    y += NOW_ROW_H + NOW_ROW_GAP
-
-    baseline = baseline_for(draw, "0", value_font, y + NOW_ROW_H / 2)
-    draw_text(draw, LEFT_X0, baseline, "TODAY", label_font, TRACK_LABEL)
-    high = fmt_temp(weather.get("today_high"))
-    low = fmt_temp(weather.get("today_low"))
-    x = value_x
-    draw_text(draw, x, baseline, high, value_font, track_value)
-    x += text_width(high, value_font, track_value) + NOW_SLASH_MARGIN
     slash_font = light(SIZE_SLASH)
-    draw_text(draw, x, baseline, "/", slash_font)
-    x += slash_font.getlength("/") + NOW_SLASH_MARGIN
-    draw_text(draw, x, baseline, low, value_font, track_value)
+
+    baseline = baseline_for(draw, "0", value_font, y + NOW_ROW_H / 2)
+    draw_text(draw, LEFT_X0, baseline, label, regular(SIZE_LABEL), TRACK_LABEL)
+    x = LEFT_X0 + NOW_LABEL_COL
+    for i, value in enumerate(values):
+        if i:
+            x += NOW_SLASH_MARGIN
+            draw_text(draw, x, baseline, "/", slash_font)
+            x += slash_font.getlength("/") + NOW_SLASH_MARGIN
+        text = fmt_temp(value)
+        draw_text(draw, x, baseline, text, value_font, track_value)
+        x += text_width(text, value_font, track_value)
 
 
 # ── Right zone A: METRICS (y 0-168) ───────────────────────────────────────────
@@ -1549,6 +1703,10 @@ def check_widths():
     hour_budget = (RIGHT_X1 - RIGHT_X0) / NEXT_HOURS - NEXT_HOUR_GLYPH_COL
     assert hour_w <= hour_budget, f"hour temperature overflows: {hour_w:.0f} px"
 
+    for label in ("FEELS", "TODAY", "SO FAR"):
+        width = text_width(label, regular(SIZE_LABEL), TRACK_LABEL)
+        assert width <= NOW_LABEL_COL - 8, f"NOW label {label} crowds its value"
+
     for units in UNIT_SYSTEMS:
         for key in ("wind_label", "rain_label"):
             label = text_width(UNIT_TEXT[units][key], regular(SIZE_LABEL), TRACK_LABEL)
@@ -1653,6 +1811,7 @@ SCENARIOS = {
         "temp": 21.8, "feels": 24.4, "high": 30.0, "low": 18.0, "dew": 18.0,
         "icon": "partly", "conditions": "Partly Cloudy",
         "wind": 0.0, "rain": 0.0, "pressure": 1021.0, "daylight": "13h56",
+        "so_far": (24.6, 17.2),
         "hours": [("partly", 24.0, 5), ("clear", 24.0, 0),
                   ("partly", 22.0, 0), ("cloud", 21.0, 10)],
         "days": [("clear", 30.0), ("clear", 31.0), ("clear", 28.0),
@@ -1662,6 +1821,7 @@ SCENARIOS = {
         "temp": 25.4, "feels": 27.1, "high": 26.0, "low": 17.0, "dew": 19.0,
         "icon": "storm", "conditions": "thunderstorms",
         "wind": 34.0, "rain": 4.2, "pressure": 998.0, "daylight": "15h12",
+        "so_far": (27.9, 16.8),
         "hours": [("cloud", 25.0, 30), ("rain", 24.0, 70),
                   ("rain", 22.0, 80), ("storm", 21.0, 90)],
         "days": [("storm", 24.0), ("rain", 26.0), ("rain", 22.0),
@@ -1671,6 +1831,7 @@ SCENARIOS = {
         "temp": -9.2, "feels": -14.3, "high": -8.0, "low": -17.0, "dew": -13.0,
         "icon": "snow", "conditions": "snow all day",
         "wind": 41.0, "rain": 0.0, "pressure": 994.0, "daylight": "8h36",
+        "so_far": (-7.8, -16.2),
         "hours": [("cloud", -9.0, 20), ("snow", -10.0, 80),
                   ("snow", -12.0, 90), ("snow", -13.0, 90)],
         "days": [("snow", -8.0), ("snow", -11.0), ("cloud", -11.0),
@@ -1680,6 +1841,7 @@ SCENARIOS = {
         "temp": 11.3, "feels": 9.4, "high": 13.0, "low": 8.0, "dew": 10.0,
         "icon": "rain", "conditions": "rain easing this evening",
         "wind": 22.0, "rain": 12.6, "pressure": 1002.0, "daylight": "11h08",
+        "so_far": (12.4, 8.9),
         "hours": [("rain", 11.0, 90), ("rain", 11.0, 90),
                   ("rain", 10.0, 80), ("cloud", 10.0, 20)],
         "days": [("rain", 12.0), ("rain", 11.0), ("cloud", 13.0),
@@ -1689,6 +1851,7 @@ SCENARIOS = {
         "temp": 33.4, "feels": 36.2, "high": 34.0, "low": 21.0, "dew": 20.0,
         "icon": "clear", "conditions": "clear and very hot",
         "wind": 8.0, "rain": 0.0, "pressure": 1018.0, "daylight": "15h44",
+        "so_far": (33.9, 21.6),
         "hours": [("clear", 33.0, 0), ("clear", 32.0, 0),
                   ("clear", 30.0, 0), ("partly", 28.0, 0)],
         "days": [("clear", 33.0), ("clear", 34.0), ("clear", 35.0),
@@ -1716,6 +1879,8 @@ def scenario_weather(name):
         "obs_time": now,
         "today_high": spec["high"],
         "today_low": spec["low"],
+        "measured_high": spec["so_far"][0],
+        "measured_low": spec["so_far"][1],
         "today_conditions": spec["conditions"],
         "dew_point": spec["dew"],
         "wind_avg": spec["wind"],

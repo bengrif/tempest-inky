@@ -18,7 +18,7 @@ Two columns split by a rule at x=362, with fixed geometry — nothing moves betw
 
 | Zone | Contents |
 |------|----------|
-| **NOW** (362 × 480, left) | The condition as a 100 px glyph, the temperature at 172 px in whole degrees, and below a rule, the feels-like and today's high and low on a shared label column. |
+| **NOW** (362 × 480, left) | The condition as a 100 px glyph over the temperature at 172 px in whole degrees, both right-justified to the column edge. Below a rule, three rows on a shared label column: `FEELS`, `TODAY` — Tempest's forecast high and low for the day — and `SO FAR`, the highest and lowest the station has actually measured since local midnight. |
 | **METRICS** (168 px) | Wind and the last-updated time on top, rain and daylight below, in a 2×2 grid — always these four, always in this order, each carrying its unit in the label so the value stays as large as the cell allows. A cell with no data shows a dash rather than disappearing. `UPDATED` is when the data was last fetched, so after a failed fetch it shows how old the figures on the panel are. |
 | **NEXT** (160 px) | The single highest-priority thing worth knowing — station trouble, lightning, rain starting, gusts or frost — in sentence case, over a sub-line of qualifying figures, over the next four hours. When nothing needs flagging it shows the current condition instead, such as `Partly cloudy`, and keeps its height either way. The exact temperature lives on the sub-line, since the hero rounds. |
 | **LATER** (152 px) | Five days: name, condition glyph, a 12 px temperature bar and the high. Bar *length* is relative to that week's own range, so it shows the week's shape; bar *fill* is absolute — blue below 0 °C, green to 9, white to 19, then yellow, orange and red — so it shows the week's level. There is no key: the high is printed beside every bar, so the panel teaches its own scale. |
@@ -153,6 +153,13 @@ The display will update automatically ~2 minutes after boot. After that it check
 | **Refresh schedule** | Adaptive: every 15 min normally, 10 min when rain is likely in the next hour, 60 min overnight (22:00–06:00). The timer ticks every 5 min and `main.py` decides whether a tick is due. |
 | **Repaints** | Only when the current temperature, as displayed, has changed — `21.8°` to `21.9°` is still `22°` and leaves the panel alone. Everything else on the panel updates at the next repaint. `--force` always repaints |
 | **Failed fetch** | Leaves the panel exactly as it is and retries on the next 5-minute tick. The `UPDATED` cell shows when the figures on the panel were fetched |
+| **Measured high and low** | Each poll also reads the station's minute-by-minute history since the previous poll — the first poll of the day reads from midnight — and keeps a running high and low in `~/.tempest-last.json`, reset at local midnight. If the history can't be read, the range so far is kept and the gap is filled in by the next poll that succeeds, including hours when the Pi was switched off |
+| **Virtual environment** | Self-contained; immune to system Python upgrades |
+| **Network resilience** | Waits up to 2 minutes for WiFi before fetching |
+| **API retry** | Up to 3 attempts with exponential backoff on failure |
+| **Logging** | systemd journal (RAM-backed; no extra SD card wear) |
+| **Hang protection** | systemd kills the process after 5 minutes |
+| **Type** | Jost 300/400/600 and Weather Icons, both SIL OFL and committed to `assets/`. Figures are tabular, so values do not shuffle sideways between refreshes |
 
 ---
 
