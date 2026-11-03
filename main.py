@@ -643,15 +643,37 @@ def draw_row(draw, x, centre_y, content, font, track=0.0, fill=BLACK,
     )
 
 
-def draw_glyph(draw, x, centre_y, glyph, size, fill=BLACK):
-    """Draw an icon glyph left-aligned at x, centred on its own ink.
+@lru_cache(maxsize=128)
+def ink_right(font, char):
+    """How far right of its origin a character's ink actually ends.
+
+    Not font.getbbox: for these faces Pillow reports the advance box there,
+    which for Jost's `°` at 172 px is 3 px wider than the ink. Right-aligning
+    by it leaves the hero short of the edge that the glyph above it reaches.
+    """
+    pad = int(font.size)
+    canvas = Image.new("L", (pad * 3, pad * 3), 0)
+    ImageDraw.Draw(canvas).text((pad, pad * 2), char, font=font, fill=255, anchor="ls")
+    # Thresholded exactly as hard_text paints it, so a faint anti-aliased
+    # edge that never reaches the panel does not count as ink.
+    box = canvas.point(lambda v: 255 if v >= 128 else 0).getbbox()
+    return (box[2] - pad) if box else font.getlength(char)
+
+
+def draw_glyph(draw, x, centre_y, glyph, size, fill=BLACK, align="left"):
+    """Draw an icon glyph at x, centred vertically on its own ink.
 
     Weather Icons advances vary by more than a factor of two, so a glyph is
-    centred on itself rather than on a shared reference.
+    centred on itself rather than on a shared reference. Right alignment
+    puts the glyph's ink, not its advance, against x: the side bearings
+    differ from glyph to glyph, and aligning advances would leave each
+    condition a different distance from the edge.
     """
     if not glyph:
         return
     font = icon(size)
+    if align == "right":
+        x -= ink_right(font, glyph)
     draw_text(draw, x, baseline_for(draw, glyph, font, centre_y), glyph, font, fill=fill)
 
 
@@ -1200,7 +1222,9 @@ def draw_now(draw, weather):
     y = NOW_PAD_Y + (HEIGHT - 2 * NOW_PAD_Y - NOW_BLOCK_H) / 2
 
     glyph = condition_glyph(weather.get("icon_name"), is_night(weather))
-    draw_glyph(draw, LEFT_X0, y + NOW_GLYPH_BOX / 2, glyph, SIZE_HERO_GLYPH)
+    draw_glyph(
+        draw, LEFT_X1, y + NOW_GLYPH_BOX / 2, glyph, SIZE_HERO_GLYPH, align="right",
+    )
     y += NOW_GLYPH_BOX + NOW_TEMP_GAP
 
     # Whole degrees: 22°, not 21.8°. Dropping the decimal is ~35 % narrower,
@@ -1216,9 +1240,16 @@ def draw_now(draw, weather):
         temp_str = fmt_temp(temp)
         size = hero_temp_size(temp_str)
         temp_font, track = semibold(size), TRACK_TEMP * size / SIZE_TEMP
+    # Right-justified to the column's inner edge, so the units digit and the
+    # degree sign hold still as the reading changes length and the number
+    # sits against the rule, next to the right column it is read with. The
+    # last character's ink, not its advance, meets the edge, so the number
+    # lines up exactly with the glyph above it.
+    last = temp_str[-1]
+    trailing = temp_font.getlength(last) - ink_right(temp_font, last)
     draw_row(
-        draw, LEFT_X0, y + NOW_TEMP_BOX / 2, temp_str, temp_font, track,
-        ref="0",
+        draw, LEFT_X1 + trailing, y + NOW_TEMP_BOX / 2, temp_str, temp_font, track,
+        align="right", ref="0",
     )
     y += NOW_TEMP_BOX + NOW_RULE_ABOVE
 
