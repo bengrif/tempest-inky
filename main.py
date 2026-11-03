@@ -1525,8 +1525,10 @@ def precip_transition(weather):
         return None
 
     wet = [h["prob"] >= PRECIP_LIKELY_PCT for h in hours]
+    # The type of the wet hours, not the first hour: a dry hour still
+    # carries a precip_type, and taking it named snow "Rain".
     kind = None
-    for hour in hours:
+    for hour, is_wet in sorted(zip(hours, wet), key=lambda pair: not pair[1]):
         if hour.get("type"):
             kind = str(hour["type"]).lower()
             break
