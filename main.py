@@ -141,6 +141,33 @@ def load_config():
 STATION_ID, TOKEN = load_config()
 
 
+UNIT_SYSTEMS = ("metric", "imperial")
+
+
+def load_units():
+    """Display units: "metric" (the default) or "imperial".
+
+    Env wins over secrets.py. This only changes what is printed: the API is
+    always asked for metric, and every threshold, temperature band, cache
+    and scenario stays in metric, so switching units can never move a
+    threshold or mix two unit systems in one cached payload.
+    """
+    module = get_secrets()
+    raw = (
+        os.environ.get("TEMPEST_UNITS")
+        or (getattr(module, "UNITS", None) if module is not None else None)
+        or "metric"
+    )
+    units = str(raw).strip().lower()
+    if units not in UNIT_SYSTEMS:
+        print(f"Ignoring UNITS={raw!r}: use 'metric' or 'imperial'. Using metric.")
+        return "metric"
+    return units
+
+
+UNITS = load_units()
+
+
 BASE_DIR = get_base_path()
 ASSETS_ROOT = os.path.join(BASE_DIR, "assets")
 
@@ -437,16 +464,74 @@ def _rounded(value, decimals):
     return out[1:] if out.startswith("-") and float(out) == 0 else out
 
 
-def fmt_temp(value, decimals=0):
-    if value is None:
-        return DASH
-    return f"{_rounded(value, decimals)}°"
-
-
 def fmt_num(value, decimals=0, suffix=""):
     if value is None:
         return DASH
     return f"{_rounded(value, decimals)}{suffix}"
+
+
+# ── Display units ─────────────────────────────────────────────────────────────
+# Every value in the payload is metric. These convert at the moment of
+# printing and nowhere else, which is what keeps thresholds and bands honest.
+
+KM_PER_MILE = 1.609344
+MM_PER_INCH = 25.4
+MB_PER_INHG = 33.8639
+
+UNIT_TEXT = {
+    "metric": {
+        "speed": "km/h", "rain": "mm", "distance": "km",
+        "wind_label": "WIND KM/H", "rain_label": "RAIN MM",
+    },
+    "imperial": {
+        "speed": "mph", "rain": "in", "distance": "mi",
+        # "RAIN IN" reads as a preposition at a glance; the cell has room.
+        "wind_label": "WIND MPH", "rain_label": "RAIN INCHES",
+    },
+}
+
+
+def imperial():
+    return UNITS == "imperial"
+
+
+def unit_text(key):
+    return UNIT_TEXT[UNITS][key]
+
+
+def fmt_temp(value, decimals=0):
+    """A Celsius reading in the display unit, with a bare degree sign."""
+    if value is None:
+        return DASH
+    if imperial():
+        value = value * 9 / 5 + 32
+    return f"{_rounded(value, decimals)}°"
+
+
+def fmt_speed(kph, decimals=0):
+    if kph is not None and imperial():
+        kph = kph / KM_PER_MILE
+    return fmt_num(kph, decimals)
+
+
+def fmt_rain(mm):
+    """Millimetres to one decimal; inches need two to show a drizzle at all."""
+    if mm is not None and imperial():
+        return fmt_num(mm / MM_PER_INCH, 2)
+    return fmt_num(mm, 1)
+
+
+def fmt_pressure(mb):
+    """Whole millibars, or inches of mercury to two decimals."""
+    if mb is not None and imperial():
+        return fmt_num(mb / MB_PER_INHG, 2)
+    return fmt_num(mb, 0)
+
+
+def fmt_distance(km):
+    if km is not None and imperial():
+        km = km / KM_PER_MILE
+    return fmt_num(km, 0)
 
 
 def hhmm(epoch):
@@ -1098,6 +1183,37 @@ UNIT_PARAMS = {
 }
 
 
+def forecast_unit_params():
+    """The forecast request's units: Fahrenheit when the panel shows it.
+
+    The forecast rounds its temperatures to whole degrees in whichever unit
+    is asked for, so a whole Celsius high converted to Fahrenheit can be a
+    degree away from the high Tempest itself forecasts in Fahrenheit. Asking
+    for Fahrenheit and converting it to Celsius on the way in keeps the
+    payload metric and still prints Tempest's own figure, because fmt_temp
+    converts it straight back.
+    """
+    if imperial():
+        return {**UNIT_PARAMS, "units_temp": "f"}
+    return UNIT_PARAMS
+
+
+def forecast_temp(value):
+    """A forecast temperature, in Celsius whatever unit it was requested in."""
+    value = _num(value)
+    if value is None or not imperial():
+        return value
+    return (value - 32) * 5 / 9
+
+
+def forecast_temp_delta(value):
+    """A forecast temperature difference, which converts without the offset."""
+    value = _num(value)
+    if value is None or not imperial():
+        return value
+    return value * 5 / 9
+
+
 def fetch_station_location(session):
     """Station coordinates and timezone, for stations the forecast omits them for."""
     try:
@@ -1124,8 +1240,11 @@ def fetch_station_location(session):
 def fetch_weather(retries=3):
     """Fetch from the Tempest API with exponential-backoff retry.
 
-    Units are requested from the API rather than converted by hand, so the
-    numbers can never drift out of sync with their own labels.
+    The payload is always metric, whatever UNITS says, so the cache and
+    every threshold share one unit system, and the fmt_* helpers convert to
+    imperial at the moment of printing. The one exception on the wire is
+    the forecast, which is fetched in Fahrenheit for an imperial panel and
+    converted to Celsius here; see forecast_unit_params.
     """
     last_err = None
     session = requests.Session()
@@ -1148,7 +1267,10 @@ def fetch_weather(retries=3):
 
             forecast_response = session.get(
                 f"{API_BASE_URL}/better_forecast",
-                params={"station_id": STATION_ID, "token": TOKEN, **UNIT_PARAMS},
+                params={
+                    "station_id": STATION_ID, "token": TOKEN,
+                    **forecast_unit_params(),
+                },
                 timeout=HTTP_TIMEOUT,
             )
             forecast_response.raise_for_status()
@@ -1167,8 +1289,8 @@ def fetch_weather(retries=3):
                     "day": time.strftime(
                         "%a", time.localtime(_num(day.get("day_start_local")) or 0)
                     ).upper(),
-                    "high": _num(day.get("air_temp_high")),
-                    "low": _num(day.get("air_temp_low")),
+                    "high": forecast_temp(day.get("air_temp_high")),
+                    "low": forecast_temp(day.get("air_temp_low")),
                     "icon": day.get("icon", "cloudy"),
                     "conditions": day.get("conditions", ""),
                     "precip_prob": _num(day.get("precip_probability")),
@@ -1181,7 +1303,7 @@ def fetch_weather(retries=3):
                     "time": _num(hour.get("time")),
                     "prob": _num(hour.get("precip_probability")),
                     "type": hour.get("precip_type"),
-                    "temp": _num(hour.get("air_temperature")),
+                    "temp": forecast_temp(hour.get("air_temperature")),
                     "icon": hour.get("icon"),
                 }
                 for hour in hourly[:24]
@@ -1198,14 +1320,14 @@ def fetch_weather(retries=3):
 
             return {
                 "temp": _num(obs.get("air_temperature")),
-                "feels_like": _num(current.get("feels_like")) if _num(
+                "feels_like": forecast_temp(current.get("feels_like")) if _num(
                     current.get("feels_like")
                 ) is not None else _num(obs.get("feels_like")),
                 "condition": current.get("conditions") or daily[0].get("conditions") or "",
                 "icon_name": current.get("icon") or daily[0].get("icon") or "clear-day",
                 "obs_time": _num(obs.get("timestamp")),
-                "today_high": _num(daily[0].get("air_temp_high")),
-                "today_low": _num(daily[0].get("air_temp_low")),
+                "today_high": forecast_temp(daily[0].get("air_temp_high")),
+                "today_low": forecast_temp(daily[0].get("air_temp_low")),
                 "today_conditions": daily[0].get("conditions", ""),
                 "dew_point": _num(obs.get("dew_point")),
                 "wind_avg": _num(obs.get("wind_avg")),
@@ -1217,8 +1339,8 @@ def fetch_weather(retries=3):
                 "rain_yesterday": _num(obs.get("precip_accum_local_yesterday")),
                 "rain_minutes_today": _num(obs.get("precip_minutes_local_day")),
                 "humidity": _num(obs.get("relative_humidity")),
-                "wet_bulb": _num(current.get("wet_bulb_temperature")),
-                "delta_t": _num(current.get("delta_t")),
+                "wet_bulb": forecast_temp(current.get("wet_bulb_temperature")),
+                "delta_t": forecast_temp_delta(current.get("delta_t")),
                 "battery": _num(obs.get("battery")),
                 "solar_radiation": _num(obs.get("solar_radiation")),
                 "brightness": _num(obs.get("brightness")),
@@ -1300,7 +1422,7 @@ def select_concern(weather):
     now = weather.get("obs_time") or time.time()
     exact = weather.get("temp")
     # The hero rounds to whole degrees, so the exact reading lives here.
-    exact_clause = f"{exact:.1f}°" if exact is not None else None
+    exact_clause = fmt_temp(exact, 1) if exact is not None else None
 
     # 1. Official alert. Also lights the beacon.
     alert = weather.get("alert")
@@ -1350,12 +1472,13 @@ def select_concern(weather):
         and strike_km <= LIGHTNING_NEAR_KM
     ):
         count = weather.get("lightning_count")
-        clauses = [f"nearest strike {strike_km:.0f} km", hhmm(strike_epoch)]
+        distance = f"{fmt_distance(strike_km)} {unit_text('distance')}"
+        clauses = [f"nearest strike {distance}", hhmm(strike_epoch)]
         if count:
             clauses.append(f"{int(count)} strikes")
         return {
             "glyph": WI["lightning"],
-            "headline": f"Lightning {strike_km:.0f} km",
+            "headline": f"Lightning {distance}",
             "clauses": clauses,
         }
 
@@ -1370,9 +1493,9 @@ def select_concern(weather):
         direction = get_wind_direction(weather.get("wind_dir"))
         return {
             "glyph": WI["wind"],
-            "headline": f"Gusts {gust:.0f} km/h",
+            "headline": f"Gusts {fmt_speed(gust)} {unit_text('speed')}",
             "clauses": [
-                f"{direction} · avg {fmt_num(weather.get('wind_avg'), 0)}",
+                f"{direction} · avg {fmt_speed(weather.get('wind_avg'))}",
                 exact_clause,
             ],
         }
@@ -1441,8 +1564,8 @@ def precip_transition(weather):
         rain = weather.get("rain_today")
         return [
             f"{int(hour['prob'])}% chance",
-            f"{exact:.1f}°" if exact is not None else None,
-            f"{fmt_num(rain, 1)} mm so far" if rain is not None else None,
+            fmt_temp(exact, 1) if exact is not None else None,
+            f"{fmt_rain(rain)} {unit_text('rain')} so far" if rain is not None else None,
         ]
 
     for i in range(1, len(wet)):
@@ -1552,6 +1675,23 @@ def next_hours(weather, count=NEXT_HOURS):
 
 # ── Left column: NOW (x 0-361, full height) ───────────────────────────────────
 
+def hero_temp_size(temp_str):
+    """172 px, unless the reading is too wide for the column at 172.
+
+    Only three-digit Fahrenheit gets here: `104°` is ~377 px against a
+    314 px column, and dropping the degree sign still leaves `104` at ~332.
+    The copy has nothing left to give, so the size does, by the least that
+    fits — and only on the hottest days of the year.
+    """
+    budget = LEFT_X1 - LEFT_X0
+    size = SIZE_TEMP
+    while size > SIZE_HILO and text_width(
+        temp_str, semibold(size), TRACK_TEMP * size / SIZE_TEMP
+    ) > budget:
+        size -= 2
+    return size
+
+
 def draw_now(draw, weather):
     """Condition glyph, temperature and today's range, on the severity field.
 
@@ -1588,7 +1728,9 @@ def draw_now(draw, weather):
         # tier-2 size on the same baseline.
         temp_str, temp_font, track = DASH, semibold(SIZE_HILO), 0.0
     else:
-        temp_str, temp_font, track = fmt_temp(temp), semibold(SIZE_TEMP), TRACK_TEMP
+        temp_str = fmt_temp(temp)
+        size = hero_temp_size(temp_str)
+        temp_font, track = semibold(size), TRACK_TEMP * size / SIZE_TEMP
     draw_row(
         draw, LEFT_X0, y + NOW_TEMP_BOX / 2, temp_str, temp_font, track,
         fill=fg, ref="0",
@@ -1649,9 +1791,9 @@ def metric_values(weather):
         daylight = DASH
 
     return [
-        {"label": "WIND KM/H", "value": fmt_num(weather.get("wind_avg"), 0)},
-        {"label": "RAIN MM", "value": fmt_num(weather.get("rain_today"), 1)},
-        {"label": "PRESSURE", "value": fmt_num(weather.get("pressure"), 0)},
+        {"label": unit_text("wind_label"), "value": fmt_speed(weather.get("wind_avg"))},
+        {"label": unit_text("rain_label"), "value": fmt_rain(weather.get("rain_today"))},
+        {"label": "PRESSURE", "value": fmt_pressure(weather.get("pressure"))},
         {"label": "DAYLIGHT", "value": daylight},
     ]
 
@@ -1876,6 +2018,23 @@ def check_widths():
         return
     hero = text_width("-19°", semibold(SIZE_TEMP), TRACK_TEMP)
     assert hero <= LEFT_X1 - LEFT_X0, f"hero temperature overflows: {hero:.0f} px"
+    # Three-digit Fahrenheit is fitted at draw time rather than budgeted;
+    # make sure the fit does not have to go silly small to manage it.
+    assert hero_temp_size("118°") >= 140, "three-digit hero shrinks too far"
+
+    # Three-digit Fahrenheit in the narrow columns: the forecast high and
+    # the hour strip's temperature.
+    later = text_width("118°", semibold(SIZE_DAY_HIGH))
+    assert later <= LATER_HIGH_COL, f"forecast high overflows: {later:.0f} px"
+    hour_w = text_width("118°", semibold(SIZE_HOUR_TEMP))
+    hour_budget = (RIGHT_X1 - RIGHT_X0) / NEXT_HOURS - NEXT_HOUR_GLYPH_COL
+    assert hour_w <= hour_budget, f"hour temperature overflows: {hour_w:.0f} px"
+
+    for units in UNIT_SYSTEMS:
+        for key in ("wind_label", "rain_label"):
+            label = text_width(UNIT_TEXT[units][key], regular(SIZE_LABEL), TRACK_LABEL)
+            cell = (WIDTH - RIGHT_X) / 2 - METRIC_PAD_L - METRIC_PAD_R
+            assert label <= cell, f"{units} {key} overflows: {label:.0f} px"
 
     headline = text_width(
         "Snowfall warning", semibold(SIZE_HEADLINE), TRACK_HEADLINE,

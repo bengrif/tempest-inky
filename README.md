@@ -27,6 +27,30 @@ Times are always absolute. The panel can be 15 minutes stale, so "in 3h 25m" is 
 
 ---
 
+## Units
+
+The panel shows metric by default. For Fahrenheit and other imperial units, add this to `~/secrets.py`:
+
+```python
+UNITS = "imperial"       # or "metric", the default
+```
+
+or set the `TEMPEST_UNITS` environment variable, which takes precedence. The next refresh picks it up.
+
+| Measure | Metric | Imperial |
+|---------|--------|----------|
+| Temperature | °C | °F |
+| Wind and gusts | km/h | mph |
+| Rain | mm, one decimal | inches, two decimals |
+| Pressure | mb (hPa) | inHg, two decimals |
+| Lightning distance | km | mi |
+
+In imperial mode the forecast is fetched from Tempest in °F, so the highs, lows, hourly temperatures and feels-like match the Tempest app to the degree. A forecast that arrives as a whole °C would otherwise convert to a °F figure up to a degree off Tempest's own. Everything else is read in metric and converted for display, and every threshold stays where it was: gusts flag at 40 km/h (25 mph), lightning within 15 km (9 mi), and frost at 0 °C (32 °F). The forecast bar colours keep their bands too, so a bar is blue below 32 °F, green to 49, white to 67, yellow to 76, orange to 85 and red above that.
+
+At 100 °F and above the hero temperature is three digits wide. It steps down to the largest size that fits its column, about 142 px, and returns to full size once the reading drops below 100.
+
+---
+
 ## Weather alerts
 
 The panel can carry official government warnings. The Tempest API does not have them — alerting is a TempestOne feature, not part of the public API — so this is one extra request to a national weather service. It is entirely optional and off unless a feed is available for your location.
