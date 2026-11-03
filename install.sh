@@ -218,13 +218,13 @@ OOMScoreAdjust=500
 EOF
 
 # The timer ticks every 5 minutes; main.py decides whether a tick is due.
-# Cadence is adaptive — 30 min overnight, 15 min normally, 10 min when rain
+# Cadence is adaptive — hourly overnight, 15 min normally, 10 min when rain
 # is likely in the next hour — and the service runs as the app user, which
 # cannot rewrite a unit file in /etc. A tick that is not due exits in under
 # a second without touching the network or the panel.
 sudo tee /etc/systemd/system/tempest-inky.timer > /dev/null <<EOF
 [Unit]
-Description=Tempest Inky refresh — adaptive, 10-30 minutes
+Description=Tempest Inky refresh — adaptive, 10-60 minutes
 
 [Timer]
 OnBootSec=2min
@@ -264,7 +264,7 @@ echo "  Setup Complete!"
 echo ""
 echo "  The display will update 2 minutes after reboot, then on an"
 echo "  adaptive schedule: every 15 minutes normally, 10 when rain is"
-echo "  likely within the hour, and 30 overnight (22:00-06:00)."
+echo "  likely within the hour, and hourly overnight (22:00-06:00)."
 echo ""
 echo "  Useful commands:"
 echo "    Check status : systemctl status tempest-inky.timer"

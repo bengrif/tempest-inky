@@ -150,7 +150,7 @@ The display will update automatically ~2 minutes after boot. After that it check
 
 | Feature | Detail |
 |---------|--------|
-| **Refresh schedule** | Adaptive: every 15 min normally, 10 min when rain is likely in the next hour, 30 min overnight (22:00–06:00). The timer ticks every 5 min and `main.py` decides whether a tick is due. |
+| **Refresh schedule** | Adaptive: every 15 min normally, 10 min when rain is likely in the next hour, 60 min overnight (22:00–06:00). The timer ticks every 5 min and `main.py` decides whether a tick is due. |
 | **Repaints** | Only when the current temperature, as displayed, has changed — `21.8°` to `21.9°` is still `22°` and leaves the panel alone. Everything else on the panel updates at the next repaint. `--force` always repaints |
 | **Failed fetch** | Leaves the panel exactly as it is and retries on the next 5-minute tick. The `UPDATED` cell shows when the figures on the panel were fetched |
 

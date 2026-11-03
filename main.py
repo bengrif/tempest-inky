@@ -62,7 +62,7 @@ PRECIP_LIKELY_PCT = 50
 # Adaptive refresh (minutes). The systemd timer ticks every 5 minutes and
 # main() decides whether this tick is due, because the service runs as the
 # app user and cannot rewrite a unit file in /etc.
-REFRESH_NIGHT_MIN = 30
+REFRESH_NIGHT_MIN = 60
 REFRESH_NORMAL_MIN = 15
 REFRESH_ACTIVE_MIN = 10
 NIGHT_START_HOUR = 22
@@ -745,7 +745,7 @@ def current_boot_id():
     The refresh schedule is stored as wall-clock time and survives a reboot,
     so without this the first tick after boot reads the previous boot's
     next_due and skips. That leaves the panel blank, or showing whatever it
-    held before, for up to 30 minutes after power-on. Worse, a Pi has no
+    held before, for up to an hour after power-on. Worse, a Pi has no
     RTC: until NTP syncs, the clock sits at the shutdown time, which is
     exactly when an old next_due looks most in the future.
     """
@@ -1825,7 +1825,7 @@ def main():
 
     # The schedule and the displayed temperature only move on once the panel
     # has actually been painted. Advancing them before the push meant one
-    # failed write cost a whole 10-30 minute interval before the next
+    # failed write cost a whole 10-60 minute interval before the next
     # attempt, or worse, that the panel was believed to show a temperature
     # it never received. An error screen leaves the schedule alone so the
     # next tick retries.
