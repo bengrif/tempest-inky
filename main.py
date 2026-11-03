@@ -476,7 +476,6 @@ def fmt_num(value, decimals=0, suffix=""):
 
 KM_PER_MILE = 1.609344
 MM_PER_INCH = 25.4
-MB_PER_INHG = 33.8639
 
 UNIT_TEXT = {
     "metric": {
@@ -519,13 +518,6 @@ def fmt_rain(mm):
     if mm is not None and imperial():
         return fmt_num(mm / MM_PER_INCH, 2)
     return fmt_num(mm, 1)
-
-
-def fmt_pressure(mb):
-    """Whole millibars, or inches of mercury to two decimals."""
-    if mb is not None and imperial():
-        return fmt_num(mb / MB_PER_INHG, 2)
-    return fmt_num(mb, 0)
 
 
 def fmt_distance(km):
@@ -1773,15 +1765,21 @@ def draw_now(draw, weather):
 # ── Right zone A: METRICS (y 0-168) ───────────────────────────────────────────
 
 def metric_values(weather):
-    """The four metrics and their order are fixed forever.
+    """The four cells and their order are fixed forever.
 
     That is what guarantees nothing is ever missing: the number you want is
-    always in the position you last found it. A metric with no data renders
+    always in the position you last found it. A cell with no data renders
     an em dash — it does not vanish and it is not reordered.
 
     Units live in the label, never in the value. A cell is only ~217 px
-    wide and `1021 hPa` beside `13h 56m` collides; that was measured, not
-    preferred.
+    wide and a value with its unit beside `13h 56m` collides; that was
+    measured, not preferred.
+
+    UPDATED is when the payload was fetched, not when the panel last
+    painted. A failed fetch redraws the cached payload with its own
+    fetched_at, so this cell shows how old the figures are, which a paint
+    time would hide. The NEXT zone separately flags a station that has
+    stopped reporting.
     """
     sunrise, sunset = weather.get("sunrise"), weather.get("sunset")
     if sunrise and sunset and sunset > sunrise:
@@ -1792,8 +1790,8 @@ def metric_values(weather):
 
     return [
         {"label": unit_text("wind_label"), "value": fmt_speed(weather.get("wind_avg"))},
+        {"label": "UPDATED", "value": hhmm(weather.get("fetched_at"))},
         {"label": unit_text("rain_label"), "value": fmt_rain(weather.get("rain_today"))},
-        {"label": "PRESSURE", "value": fmt_pressure(weather.get("pressure"))},
         {"label": "DAYLIGHT", "value": daylight},
     ]
 

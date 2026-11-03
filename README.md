@@ -19,7 +19,7 @@ Two columns split by a rule at x=362, with fixed geometry — nothing moves betw
 | Zone | Contents |
 |------|----------|
 | **NOW** (362 × 480, left) | The condition as a 100 px glyph, the temperature at 172 px in whole degrees, and below a rule, the feels-like and today's high and low on a shared label column. Fills with the alert colour when a government warning is active — a field of ink has no legibility threshold at all, so it registers from anywhere in the room. |
-| **METRICS** (168 px) | Wind, rain, pressure and daylight in a 2×2 grid — always these four, always in this order, each carrying its unit in the label so the value stays as large as the cell allows. A metric with no data shows a dash rather than disappearing. |
+| **METRICS** (168 px) | Wind and the last-updated time on top, rain and daylight below, in a 2×2 grid — always these four, always in this order, each carrying its unit in the label so the value stays as large as the cell allows. A cell with no data shows a dash rather than disappearing. `UPDATED` is when the data was last fetched, so after a failed fetch it shows how old the figures on the panel are. |
 | **NEXT** (160 px) | The single highest-priority thing worth knowing — an official alert, lightning, rain starting, gusts, frost, or station trouble — in sentence case, over a sub-line of qualifying figures, over the next four hours. When nothing needs flagging it shows the current condition instead, such as `Partly cloudy`, and keeps its height either way. The exact temperature lives on the sub-line, since the hero rounds. |
 | **LATER** (152 px) | Five days: name, condition glyph, a 12 px temperature bar and the high. Bar *length* is relative to that week's own range, so it shows the week's shape; bar *fill* is absolute — blue below 0 °C, green to 9, white to 19, then yellow, orange and red — so it shows the week's level. There is no key: the high is printed beside every bar, so the panel teaches its own scale. |
 
@@ -42,7 +42,6 @@ or set the `TEMPEST_UNITS` environment variable, which takes precedence. The nex
 | Temperature | °C | °F |
 | Wind and gusts | km/h | mph |
 | Rain | mm, one decimal | inches, two decimals |
-| Pressure | mb (hPa) | inHg, two decimals |
 | Lightning distance | km | mi |
 
 In imperial mode the forecast is fetched from Tempest in °F, so the highs, lows, hourly temperatures and feels-like match the Tempest app to the degree. A forecast that arrives as a whole °C would otherwise convert to a °F figure up to a degree off Tempest's own. Everything else is read in metric and converted for display, and every threshold stays where it was: gusts flag at 40 km/h (25 mph), lightning within 15 km (9 mi), and frost at 0 °C (32 °F). The forecast bar colours keep their bands too, so a bar is blue below 32 °F, green to 49, white to 67, yellow to 76, orange to 85 and red above that.
