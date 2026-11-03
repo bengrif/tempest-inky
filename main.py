@@ -1,7 +1,7 @@
 """Tempest Inky dashboard — layout 10.
 
 Renders an 800x480 panel for the Pimoroni Inky Impression 7.3" (7 colour)
-from a WeatherFlow Tempest station, plus an optional government alert feed.
+from a WeatherFlow Tempest station.
 
 The panel is read from a sofa about 4.5 m away, in a dim room. Comfortable
 reading needs a cap height of roughly distance / 200, which at 137 ppi is
@@ -20,10 +20,9 @@ of the numbers: one 24 px margin every zone insets by, fixed-width label
 columns so values start on shared verticals, and nothing within 12 px of a
 rule.
 
-Colour is fill only. The 362x480 left field carries official alert severity
-and nothing else; the 12 px forecast bars carry absolute temperature and
-nothing else. Condition is carried by glyphs and has no ink of its own. All
-type is black, or white on blue.
+Colour is fill only, and only the 12 px forecast bars carry it, for
+absolute temperature and nothing else. Condition is carried by glyphs and
+has no ink of its own. All type is black.
 """
 
 
@@ -31,12 +30,9 @@ import argparse
 import importlib.util
 import json
 import os
-import re
 import socket
 import sys
 import time
-import xml.etree.ElementTree as ET
-from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 
 import requests
@@ -54,7 +50,6 @@ HTTP_TIMEOUT = 20
 DITHER_NONE = getattr(getattr(Image, "Dither", Image), "NONE", 0)
 
 STATE_FILE = os.path.join(user_home, ".tempest-last.json")
-ALERT_FILE = os.path.join(user_home, ".tempest-alert.json")
 
 # Thresholds for the headline band.
 GUST_THRESHOLD_KPH = 40.0
@@ -90,8 +85,8 @@ def get_app_path():
 def load_secrets_file(path):
     """Import a secrets.py and hand back the module.
 
-    The module rather than a tuple, because it now carries optional
-    location settings alongside the credentials.
+    The module rather than a tuple, because it carries optional settings
+    such as UNITS alongside the credentials.
     """
     spec = importlib.util.spec_from_file_location("tempest_user_secrets", path)
     if spec is None or spec.loader is None:
@@ -213,17 +208,6 @@ TEMP_BANDS = [
     (30, INK_ORANGE),    # 25-29
     (None, INK_RED),     # 30 and above
 ]
-
-# The alert ladder. Deliberately reuses inks from the temperature scale: the
-# two are separated by region and size — the field is 362x480 and the bars
-# are 12 px — and they never occur in the same element.
-SEVERITY_INK = {
-    "advisory": INK_YELLOW,
-    "watch": INK_ORANGE,
-    "warning": INK_RED,
-}
-SEVERITY_RANK = {"advisory": 1, "watch": 2, "warning": 3}
-SEVERITY_COLOUR_NAME = {"advisory": "yellow", "watch": "orange", "warning": "red"}
 
 DASH = "—"          # em dash, the "no data" mark
 MIDDOT = "·"
@@ -444,16 +428,6 @@ def fonts_loaded():
     )
 
 
-def type_on(ink):
-    """Black on every ink except blue, which is the only dark one.
-
-    Black on blue measures ~2.4:1 and fails; white on blue is ~8.6:1. No
-    severity ink is blue, so the left field is always black type — this is
-    here so a future ink cannot silently break the contrast rule.
-    """
-    return WHITE if ink == INK_BLUE else BLACK
-
-
 def _rounded(value, decimals):
     """Round for display, without printing a negative zero.
 
@@ -537,8 +511,8 @@ def sentence_case(value):
 
     The headline is sentence case, not caps: all-caps is reserved for the
     tracked micro-labels, it stops the panel shouting twice, and it is what
-    makes a long alert name fit — `Snowfall warning` is 240 px in Jost 600
-    at 31 px against 497 px for the same string in caps at 42 px.
+    makes a long condition fit — `Thunderstorms possible` in caps would
+    not.
     """
     text = " ".join((value or "").split())
     return text[:1].upper() + text[1:].lower() if text else ""
@@ -582,9 +556,8 @@ def hard_text(draw, xy, content, font, fill):
 
     PIL anti-aliases text, and with DITHER_NONE every grey edge pixel lands
     on whichever of the seven inks is nearest in RGB. Mid-grey is nearest to
-    orange, and a black-on-yellow edge blend is nearest to red — so type on
-    a severity field picks up a coloured fringe that is very visible at
-    172 px. Type here is only ever black or white, so the coverage mask is
+    orange — so black type on white picks up a coloured fringe that is very
+    visible at 172 px. Type here is only ever black, so the coverage mask is
     thresholded and the fill painted through it. The result is a hard edge,
     which is the correct rendering for a panel with seven flat inks and no
     dithering.
@@ -725,26 +698,6 @@ def condition_glyph(icon_name, night=False):
     return WI["na"]
 
 
-def alert_glyph(event):
-    """A glyph for an official alert, chosen from its event name."""
-    name = (event or "").lower()
-    if any(k in name for k in ("snow", "blizzard", "winter", "flurr", "squall")):
-        return WI["snow"]
-    if any(k in name for k in ("freezing", "frost", "cold", "wind chill", "ice")):
-        return WI["snowflake"]
-    if any(k in name for k in ("thunder", "storm", "tornado", "hurricane", "tropical")):
-        return WI["thunderstorm"]
-    if any(k in name for k in ("rain", "flood", "rainfall")):
-        return WI["rain"]
-    if "fog" in name:
-        return WI["fog"]
-    if "wind" in name or "gale" in name:
-        return WI["wind"]
-    if "heat" in name or "humidex" in name:
-        return WI["hot"]
-    return WI["na"]
-
-
 def get_wind_direction(degrees):
     if degrees is None:
         return DASH
@@ -801,355 +754,6 @@ def current_boot_id():
             return f.read().strip() or None
     except OSError:
         return None
-
-
-# ── Location and region ───────────────────────────────────────────────────────
-# Everything below is optional. With nothing configured the station's own
-# coordinates and timezone come back from the API and pick the provider.
-
-CA_TIMEZONES = {
-    "America/St_Johns", "America/Halifax", "America/Glace_Bay", "America/Moncton",
-    "America/Goose_Bay", "America/Toronto", "America/Nipigon", "America/Thunder_Bay",
-    "America/Iqaluit", "America/Pangnirtung", "America/Atikokan", "America/Winnipeg",
-    "America/Rainy_River", "America/Resolute", "America/Rankin_Inlet", "America/Regina",
-    "America/Swift_Current", "America/Edmonton", "America/Cambridge_Bay",
-    "America/Yellowknife", "America/Inuvik", "America/Creston", "America/Dawson_Creek",
-    "America/Fort_Nelson", "America/Vancouver", "America/Whitehorse", "America/Dawson",
-}
-UK_TIMEZONES = {"Europe/London", "Europe/Belfast"}
-US_EXTRA_TIMEZONES = {"Pacific/Honolulu", "America/Adak", "America/Anchorage"}
-
-
-def _env_float(name):
-    raw = os.environ.get(name)
-    if raw is None:
-        return None
-    try:
-        return float(raw)
-    except ValueError:
-        print(f"Ignoring {name}={raw!r}: not a number")
-        return None
-
-
-def load_location_config():
-    """Where the panel is, and whose alerts apply.
-
-    Env wins over secrets.py, which wins over the station's own metadata.
-    Region "auto" resolves from the station timezone at fetch time.
-    """
-    module = get_secrets()
-
-    def from_secrets(name):
-        return getattr(module, name, None) if module is not None else None
-
-    lat = _env_float("TEMPEST_LAT")
-    lon = _env_float("TEMPEST_LON")
-    if lat is None:
-        lat = _num(from_secrets("LATITUDE"))
-    if lon is None:
-        lon = _num(from_secrets("LONGITUDE"))
-
-    region = os.environ.get("TEMPEST_ALERT_REGION") or from_secrets("ALERT_REGION") or "auto"
-    area = os.environ.get("TEMPEST_ALERT_AREA") or from_secrets("ALERT_AREA") or "uk"
-    return {
-        "lat": lat,
-        "lon": lon,
-        "region": str(region).strip().lower(),
-        "area": str(area).strip().lower(),
-    }
-
-
-def detect_region(tz_name=None, lat=None, lon=None):
-    """Pick an alert provider for a station.
-
-    Timezone first, because the US and Canadian bounding boxes overlap for
-    hundreds of kilometres either side of the border — Toronto sits inside
-    the contiguous-US box. The boxes are only a fallback for the case where
-    the API returned coordinates but no timezone.
-    """
-    tz_name = (tz_name or "").strip()
-    if tz_name:
-        if tz_name in CA_TIMEZONES:
-            return "ca"
-        if tz_name in UK_TIMEZONES:
-            return "uk"
-        if tz_name in US_EXTRA_TIMEZONES or tz_name.startswith("America/"):
-            return "us"
-        return None
-
-    if lat is None or lon is None:
-        return None
-    if 49.8 <= lat <= 61.0 and -8.7 <= lon <= 1.9:
-        return "uk"
-
-    in_us = (
-        (24.4 <= lat <= 49.0 and -125.0 <= lon <= -66.9)        # contiguous
-        or (51.0 <= lat <= 71.5 and -180.0 <= lon <= -129.9)    # Alaska
-        or (18.9 <= lat <= 22.3 and -160.3 <= lon <= -154.8)    # Hawaii
-    )
-    in_ca = 41.6 <= lat <= 83.2 and -141.1 <= lon <= -52.6
-    if in_us and in_ca:
-        # The two boxes overlap for hundreds of kilometres either side of
-        # the border — Toronto is further south than Minneapolis — and
-        # serving the wrong country's alerts is worse than serving none.
-        print("Station sits in the Canada/US border band — set ALERT_REGION to ca or us.")
-        return None
-    if in_us:
-        return "us"
-    if in_ca:
-        return "ca"
-    return None
-
-
-# ── Alert feed ────────────────────────────────────────────────────────────────
-# A second network dependency that must never be able to take the weather
-# display down with it: every failure here is "no alert".
-
-ALERT_TIMEOUT = 10
-ALERT_USER_AGENT = "tempest-inky (https://github.com/moorew/tempest-inky)"
-CA_ALERTS_URL = "https://api.weather.gc.ca/collections/weather-alerts/items"
-US_ALERTS_URL = "https://api.weather.gov/alerts/active"
-UK_ALERTS_URL = "https://www.metoffice.gov.uk/public/data/PWSCache/WarningsRSS/Region/{area}"
-
-UK_COLOUR_SEVERITY = {"yellow": "advisory", "amber": "watch", "red": "warning"}
-
-# Met Office regional warning feeds. "uk" is the national one; the rest are
-# what ALERT_AREA selects, because the Met Office has no free point API and
-# every item in a regional feed applies to that region.
-UK_REGIONS = {
-    "uk": "UK (national)",
-    "os": "Orkney & Shetland",
-    "he": "Highlands & Eilean Siar",
-    "gr": "Grampian",
-    "ta": "Central, Tayside & Fife",
-    "st": "Strathclyde",
-    "dg": "Dumfries, Galloway, Lothian & Borders",
-    "ni": "Northern Ireland",
-    "wl": "Wales",
-    "sw": "South West England",
-    "se": "London & South East England",
-    "ee": "East of England",
-    "em": "East Midlands",
-    "wm": "West Midlands",
-    "yh": "Yorkshire & Humber",
-    "nw": "North West England",
-    "ne": "North East England",
-}
-UK_MONTHS = {m: i + 1 for i, m in enumerate(
-    ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
-)}
-
-
-def cap_severity(value):
-    """CAP severity to the panel's three-rung ladder.
-
-    Minor -> advisory, Moderate -> watch, Severe/Extreme -> warning. Written
-    once and shared, because all three national services speak CAP.
-    """
-    name = (value or "").strip().lower()
-    if name in ("extreme", "severe"):
-        return "warning"
-    if name == "moderate":
-        return "watch"
-    return "advisory"
-
-
-def parse_iso(value):
-    """ISO-8601 to epoch seconds, tolerating a trailing Z and no offset."""
-    if not value:
-        return None
-    try:
-        stamp = str(value).strip().replace("Z", "+00:00")
-        parsed = datetime.fromisoformat(stamp)
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        return parsed.timestamp()
-    except ValueError:
-        return None
-
-
-def _alert_ca(session, lat, lon, area):
-    """Environment Canada, via the MSC GeoMet alerts collection.
-
-    A point is expressed as a hair-thin bbox: the alert geometries are
-    regional polygons, so an intersection test is the point-in-region test.
-    """
-    delta = 0.02
-    response = session.get(
-        CA_ALERTS_URL,
-        params={
-            "f": "json",
-            "limit": 50,
-            "bbox": f"{lon - delta:.4f},{lat - delta:.4f},{lon + delta:.4f},{lat + delta:.4f}",
-        },
-        headers={"User-Agent": ALERT_USER_AGENT},
-        timeout=ALERT_TIMEOUT,
-    )
-    response.raise_for_status()
-
-    alerts = []
-    for feature in response.json().get("features", []):
-        props = feature.get("properties", {})
-        if (props.get("status_en") or "").strip().lower() == "ended":
-            continue
-        kind = (props.get("alert_type") or "").strip().lower()
-        alerts.append({
-            "severity": kind if kind in SEVERITY_RANK else "advisory",
-            "event": props.get("alert_name_en") or "Alert",
-            "expires": parse_iso(props.get("expiration_datetime")),
-            "area": props.get("feature_name_en") or "",
-        })
-    return alerts
-
-
-def _alert_us(session, lat, lon, area):
-    """US National Weather Service. Free, no key, native CAP fields."""
-    response = session.get(
-        US_ALERTS_URL,
-        params={"point": f"{lat:.4f},{lon:.4f}", "status": "actual"},
-        headers={"User-Agent": ALERT_USER_AGENT, "Accept": "application/geo+json"},
-        timeout=ALERT_TIMEOUT,
-    )
-    response.raise_for_status()
-
-    alerts = []
-    for feature in response.json().get("features", []):
-        props = feature.get("properties", {})
-        if (props.get("messageType") or "").strip().lower() == "cancel":
-            continue
-        alerts.append({
-            "severity": cap_severity(props.get("severity")),
-            "event": props.get("event") or "Alert",
-            "expires": parse_iso(props.get("ends") or props.get("expires")),
-            "area": props.get("areaDesc") or "",
-        })
-    return alerts
-
-
-def _uk_expiry(description):
-    """Pull the end of validity out of a Met Office description string.
-
-    The text reads "... valid from 1200 Mon 12 Aug to 2100 Mon 12 Aug". No
-    year is printed, so the current one is assumed and a match that lands
-    in the past is rolled forward. Anything unparseable falls back to 12 h,
-    which bounds how long a warning can linger in the cache.
-    """
-    fallback = time.time() + 12 * 3600
-    match = re.search(
-        r"\bto\s+(\d{2})(\d{2})\s+\w{3}\s+(\d{1,2})\s+(\w{3})",
-        description or "",
-        re.IGNORECASE,
-    )
-    if not match:
-        return fallback
-    hour, minute, day, month_name = match.groups()
-    month = UK_MONTHS.get(month_name[:3].lower())
-    if not month:
-        return fallback
-    try:
-        # The feed prints UK local wall-clock, and a panel configured for UK
-        # warnings is in the UK, so the panel's own offset is the right one.
-        now = datetime.now().astimezone()
-        end = datetime(now.year, month, int(day), int(hour), int(minute), tzinfo=now.tzinfo)
-        if end < now - timedelta(days=1):
-            end = end.replace(year=now.year + 1)
-        return end.timestamp()
-    except ValueError:
-        return fallback
-
-
-def _alert_uk(session, lat, lon, area):
-    """Met Office warnings RSS.
-
-    There is no free keyless point API for the UK, so this reads a regional
-    feed and every item in it applies — set ALERT_AREA to the Met Office
-    region code (`uk` for the national feed, `wl`, `se`, `os` and so on).
-    Severity comes from the colour word the Met Office already uses, which
-    maps onto the ladder directly.
-    """
-    area = area or "uk"
-    if area not in UK_REGIONS:
-        print(f"ALERT_AREA {area!r} is not a Met Office region — "
-              f"expected one of {', '.join(sorted(UK_REGIONS))}.")
-    response = session.get(
-        UK_ALERTS_URL.format(area=area),
-        headers={"User-Agent": ALERT_USER_AGENT},
-        timeout=ALERT_TIMEOUT,
-    )
-    response.raise_for_status()
-
-    root = ET.fromstring(response.content)
-    alerts = []
-    for item in root.iter("item"):
-        title = (item.findtext("title") or "").strip()
-        match = re.match(
-            r"(yellow|amber|red)\s+warning\s+of\s+(.+?)(?:\s+affecting\s+(.*))?$",
-            title,
-            re.IGNORECASE,
-        )
-        if not match:
-            continue
-        colour, hazard, where = match.groups()
-        alerts.append({
-            "severity": UK_COLOUR_SEVERITY.get(colour.lower(), "advisory"),
-            "event": f"{hazard.strip()} warning",
-            "expires": _uk_expiry(item.findtext("description") or ""),
-            "area": (where or "").strip(),
-        })
-    return alerts
-
-
-ALERT_PROVIDERS = {"ca": _alert_ca, "us": _alert_us, "uk": _alert_uk}
-
-
-def fetch_alert(region, lat, lon, area="uk"):
-    """The single alert that should own the panel, or None.
-
-    Highest severity wins; between equals, the one that runs longest, so a
-    warning does not flicker to a shorter overlapping one mid-event.
-    """
-    provider = ALERT_PROVIDERS.get(region or "")
-    if provider is None:
-        return None
-    if provider is not _alert_uk and (lat is None or lon is None):
-        return None
-
-    session = requests.Session()
-    now = time.time()
-    active = [
-        a for a in provider(session, lat, lon, area)
-        if a.get("expires") is None or a["expires"] > now
-    ]
-    if not active:
-        return None
-    return max(active, key=lambda a: (SEVERITY_RANK.get(a["severity"], 0), a.get("expires") or 0))
-
-
-def resolve_alert(region, lat, lon, area="uk"):
-    """Alert with cache fallback. Never raises, never blocks the weather."""
-    if not region or region == "none":
-        return None
-    try:
-        alert = fetch_alert(region, lat, lon, area)
-        save_json(ALERT_FILE, {
-            "alert": alert, "region": region, "area": area, "fetched_at": time.time(),
-        })
-        if alert:
-            print(f"Alert: {alert['event']} ({alert['severity']})")
-        return alert
-    except Exception as e:
-        print(f"Alert fetch failed ({region}): {e} — treating as no alert.")
-
-    # The cache is keyed by feed: a cached Canadian warning must never
-    # resurface because a UK region code was mistyped.
-    cache = load_json(ALERT_FILE)
-    if cache.get("region") != region or cache.get("area") != area:
-        return None
-    cached = cache.get("alert")
-    if cached and (cached.get("expires") or 0) > time.time():
-        print("Using cached alert.")
-        return cached
-    return None
 
 
 # ── Reliability helpers ───────────────────────────────────────────────────────
@@ -1209,29 +813,6 @@ def forecast_temp_delta(value):
     if value is None or not imperial():
         return value
     return value * 5 / 9
-
-
-def fetch_station_location(session):
-    """Station coordinates and timezone, for stations the forecast omits them for."""
-    try:
-        response = session.get(
-            f"{API_BASE_URL}/stations/{STATION_ID}",
-            params={"token": TOKEN},
-            timeout=HTTP_TIMEOUT,
-        )
-        response.raise_for_status()
-        stations = response.json().get("stations", [])
-        if not stations:
-            return None, None, None
-        station = stations[0]
-        return (
-            _num(station.get("latitude")),
-            _num(station.get("longitude")),
-            station.get("timezone"),
-        )
-    except Exception as e:
-        print(f"Could not read station location: {e}")
-        return None, None, None
 
 
 def fetch_weather(retries=3):
@@ -1306,15 +887,6 @@ def fetch_weather(retries=3):
                 for hour in hourly[:24]
             ]
 
-            lat = _num(r_for.get("latitude"))
-            lon = _num(r_for.get("longitude"))
-            tz_name = r_for.get("timezone")
-            if lat is None or lon is None or not tz_name:
-                found_lat, found_lon, found_tz = fetch_station_location(session)
-                lat = lat if lat is not None else found_lat
-                lon = lon if lon is not None else found_lon
-                tz_name = tz_name or found_tz
-
             return {
                 "temp": _num(obs.get("air_temperature")),
                 "feels_like": forecast_temp(current.get("feels_like")) if _num(
@@ -1346,9 +918,6 @@ def fetch_weather(retries=3):
                 "lightning_epoch": _num(obs.get("lightning_strike_last_epoch")),
                 "sunrise": _num(daily[0].get("sunrise")),
                 "sunset": _num(daily[0].get("sunset")),
-                "lat": lat,
-                "lon": lon,
-                "timezone": tz_name,
                 "daily": forecast_daily,
                 "hourly": forecast_hourly,
                 "fetched_at": time.time(),
@@ -1362,31 +931,13 @@ def fetch_weather(retries=3):
 
 
 def fetch_all():
-    """Weather plus alerts, or None when the weather could not be fetched.
+    """The weather, or None when it could not be fetched.
 
     Shared by the panel and the desktop preview so the two render the same
-    thing. The weather is authoritative for the panel; the alert is added
-    when it exists and silently skipped when it does not. There is no
-    fallback to an older reading: on the panel a failed fetch simply leaves
-    the last paint in place.
+    thing. There is no fallback to an older reading: on the panel a failed
+    fetch simply leaves the last paint in place.
     """
-    weather = fetch_weather()
-    if weather is None:
-        return None
-
-    location = load_location_config()
-    lat = location["lat"] if location["lat"] is not None else weather.get("lat")
-    lon = location["lon"] if location["lon"] is not None else weather.get("lon")
-    tz_name = weather.get("timezone")
-
-    region = location["region"]
-    if region == "auto":
-        region = detect_region(tz_name, lat, lon)
-        if region is None:
-            print("No alert provider for this location — alerts disabled.")
-
-    weather["alert"] = resolve_alert(region, lat, lon, location["area"])
-    return weather
+    return fetch_weather()
 
 
 # ── The NEXT zone's content ───────────────────────────────────────────────────
@@ -1407,23 +958,7 @@ def select_concern(weather):
     # The hero rounds to whole degrees, so the exact reading lives here.
     exact_clause = fmt_temp(exact, 1) if exact is not None else None
 
-    # 1. Official alert. Also lights the beacon.
-    alert = weather.get("alert")
-    if alert:
-        clauses = []
-        if alert.get("expires"):
-            clauses.append(f"until {hhmm(alert['expires'])}")
-        if exact_clause:
-            clauses.append(exact_clause)
-        if alert.get("area"):
-            clauses.append(str(alert["area"]).lower())
-        return {
-            "glyph": alert_glyph(alert.get("event")),
-            "headline": sentence_case(alert.get("event") or "Weather alert"),
-            "clauses": clauses,
-        }
-
-    # 2. Station health. No ambient state: it appears here or not at all.
+    # 1. Station health. No ambient state: it appears here or not at all.
     obs_time = weather.get("obs_time")
     # Measured against when the data was fetched, not the wall clock, so a
     # --scenario render, whose observation time is pinned to 15:30, stays
@@ -1444,7 +979,7 @@ def select_concern(weather):
             "clauses": [f"{battery:.2f} V", exact_clause],
         }
 
-    # 3. Lightning inside 15 km in the last 30 minutes.
+    # 2. Lightning inside 15 km in the last 30 minutes.
     strike_epoch = weather.get("lightning_epoch")
     strike_km = weather.get("lightning_distance")
     if (
@@ -1464,12 +999,12 @@ def select_concern(weather):
             "clauses": clauses,
         }
 
-    # 4. Precipitation starting or stopping within three hours.
+    # 3. Precipitation starting or stopping within three hours.
     transition = precip_transition(weather)
     if transition:
         return transition
 
-    # 5. Gust above the threshold.
+    # 4. Gust above the threshold.
     gust = weather.get("wind_gust")
     if gust is not None and gust >= GUST_THRESHOLD_KPH:
         direction = get_wind_direction(weather.get("wind_dir"))
@@ -1482,7 +1017,7 @@ def select_concern(weather):
             ],
         }
 
-    # 6. Frost crossing — air temperature or dew point through 0 C.
+    # 5. Frost crossing — air temperature or dew point through 0 C.
     dew = weather.get("dew_point")
     low = weather.get("today_low")
     if any(v is not None and v <= 0 for v in (exact, dew, low)):
@@ -1492,7 +1027,7 @@ def select_concern(weather):
             "clauses": [f"low {fmt_temp(low)}", f"dew {fmt_temp(dew)}", exact_clause],
         }
 
-    # 7. Nothing active: say what the sky is doing now.
+    # 6. Nothing active: say what the sky is doing now.
     # This used to read "All clear today" over the day's conditions, which
     # the API words as sky ("Partly Cloudy", "Rain Possible"), so the panel
     # said all clear and partly cloudy in one breath. It also promised the
@@ -1580,48 +1115,27 @@ def precip_transition(weather):
 
 # ── Headline copy ─────────────────────────────────────────────────────────────
 
-# Official event names that no generic rule shortens well.
-EVENT_ALIASES = {
-    "special weather statement": "Weather statement",
-    "severe thunderstorm": "Thunderstorm",
-}
 WORD_ABBREVIATIONS = {
     "precipitation": "precip",
     "temperature": "temp",
     "kilometre": "km",
 }
-LEVEL_WORDS = ("warning", "watch", "advisory", "statement")
 
 
 def shorten_headline(draw, headline, font, max_width, track=0.0):
     """Make the headline fit on one line without shrinking the type.
 
     The type size comes from a legibility budget, so when a string is too
-    long the copy gives way and never the size. In order: the name as
-    issued, then known abbreviations, then the hazard without its level
-    word — the field behind it is already carrying the level — then the
-    last two words, then the last word, then a truncation.
-
-    Dropping the level rather than the hazard is deliberate: `Freezing
-    rain` tells you more than `Rain warning`, and the panel is already red.
+    long the copy gives way and never the size. In order: the text as
+    given, then known abbreviations, then the last two words, then the
+    last word, then a truncation.
     """
-    short = sentence_case(headline)
-    for long_form, replacement in EVENT_ALIASES.items():
-        if long_form in short.lower():
-            short = sentence_case(
-                re.sub(long_form, replacement, short, flags=re.IGNORECASE)
-            )
     short = sentence_case(
-        " ".join(WORD_ABBREVIATIONS.get(w.lower(), w) for w in short.split())
+        " ".join(WORD_ABBREVIATIONS.get(w.lower(), w) for w in headline.split())
     )
 
     candidates = [sentence_case(headline), short]
     words = short.split()
-    for level in LEVEL_WORDS:
-        # Only when something meaningful is left: "Weather statement"
-        # collapsing to "Weather" would say nothing at all.
-        if short.lower().endswith(f" {level}") and len(words) > 2:
-            candidates.append(sentence_case(" ".join(words[:-1])))
     if len(words) > 2:
         candidates.append(sentence_case(" ".join(words[-2:])))
     if len(words) > 1:
@@ -1678,21 +1192,7 @@ def hero_temp_size(temp_str):
 
 
 def draw_now(draw, weather):
-    """Condition glyph, temperature and today's range, on the severity field.
-
-    The field is the beacon: a 362x480 area of ink has no legibility
-    threshold at all, so it stays detectable in peripheral vision where no
-    type can. It is also the heaviest possible e-ink refresh and red is
-    among the slowest inks, so it fires only for an official alert and
-    never for ordinary conditions — a beacon that lights on every wet day
-    means nothing.
-    """
-    alert = weather.get("alert")
-    ink = SEVERITY_INK.get((alert or {}).get("severity"), WHITE)
-    fg = type_on(ink)
-
-    if ink != WHITE:
-        draw.rectangle([0, 0, COLUMN_X - 1, HEIGHT - 1], fill=ink)
+    """Condition glyph, temperature and today's range, black on white."""
     draw.rectangle([COLUMN_X, 0, COLUMN_X + RULE_ZONE - 1, HEIGHT - 1], fill=BLACK)
 
     # The block is a fixed 416 px tall whatever the values are, so nothing
@@ -1700,7 +1200,7 @@ def draw_now(draw, weather):
     y = NOW_PAD_Y + (HEIGHT - 2 * NOW_PAD_Y - NOW_BLOCK_H) / 2
 
     glyph = condition_glyph(weather.get("icon_name"), is_night(weather))
-    draw_glyph(draw, LEFT_X0, y + NOW_GLYPH_BOX / 2, glyph, SIZE_HERO_GLYPH, fill=fg)
+    draw_glyph(draw, LEFT_X0, y + NOW_GLYPH_BOX / 2, glyph, SIZE_HERO_GLYPH)
     y += NOW_GLYPH_BOX + NOW_TEMP_GAP
 
     # Whole degrees: 22°, not 21.8°. Dropping the decimal is ~35 % narrower,
@@ -1718,12 +1218,12 @@ def draw_now(draw, weather):
         temp_font, track = semibold(size), TRACK_TEMP * size / SIZE_TEMP
     draw_row(
         draw, LEFT_X0, y + NOW_TEMP_BOX / 2, temp_str, temp_font, track,
-        fill=fg, ref="0",
+        ref="0",
     )
     y += NOW_TEMP_BOX + NOW_RULE_ABOVE
 
     draw.rectangle(
-        [LEFT_X0, round(y), LEFT_X1 - 1, round(y) + RULE_INNER - 1], fill=fg,
+        [LEFT_X0, round(y), LEFT_X1 - 1, round(y) + RULE_INNER - 1], fill=BLACK,
     )
     y += RULE_INNER + NOW_RULE_BELOW
 
@@ -1735,24 +1235,24 @@ def draw_now(draw, weather):
     value_x = LEFT_X0 + NOW_LABEL_COL
 
     baseline = baseline_for(draw, "0", value_font, y + NOW_ROW_H / 2)
-    draw_text(draw, LEFT_X0, baseline, "FEELS", label_font, TRACK_LABEL, fill=fg)
+    draw_text(draw, LEFT_X0, baseline, "FEELS", label_font, TRACK_LABEL)
     draw_text(
         draw, value_x, baseline, fmt_temp(weather.get("feels_like")),
-        value_font, track_value, fill=fg,
+        value_font, track_value,
     )
     y += NOW_ROW_H + NOW_ROW_GAP
 
     baseline = baseline_for(draw, "0", value_font, y + NOW_ROW_H / 2)
-    draw_text(draw, LEFT_X0, baseline, "TODAY", label_font, TRACK_LABEL, fill=fg)
+    draw_text(draw, LEFT_X0, baseline, "TODAY", label_font, TRACK_LABEL)
     high = fmt_temp(weather.get("today_high"))
     low = fmt_temp(weather.get("today_low"))
     x = value_x
-    draw_text(draw, x, baseline, high, value_font, track_value, fill=fg)
+    draw_text(draw, x, baseline, high, value_font, track_value)
     x += text_width(high, value_font, track_value) + NOW_SLASH_MARGIN
     slash_font = light(SIZE_SLASH)
-    draw_text(draw, x, baseline, "/", slash_font, fill=fg)
+    draw_text(draw, x, baseline, "/", slash_font)
     x += slash_font.getlength("/") + NOW_SLASH_MARGIN
-    draw_text(draw, x, baseline, low, value_font, track_value, fill=fg)
+    draw_text(draw, x, baseline, low, value_font, track_value)
 
 
 # ── Right zone A: METRICS (y 0-168) ───────────────────────────────────────────
@@ -1835,8 +1335,8 @@ def draw_metrics(draw, weather):
 def draw_next(draw, weather):
     """What is happening, the figures that qualify it, and the next 4 hours.
 
-    White ground: the colour channel belongs to the left field, and a second
-    coloured region would put severity and temperature ink side by side.
+    White ground: the only colour on the panel is the forecast bars, so
+    colour appearing always means temperature.
     """
     zone_bottom = NEXT_Y1 - RULE_ZONE
     draw.rectangle([RIGHT_X, zone_bottom, WIDTH - 1, NEXT_Y1 - 1], fill=BLACK)
@@ -1996,8 +1496,8 @@ def create_dashboard(weather, theme_name="inky"):
 def check_widths():
     """Assert the two strings most likely to overflow actually fit.
 
-    The hero temperature's widest realistic value and the longest alert
-    name in the design set. Both are inside a budget rather than measured
+    The hero temperature's widest realistic value and the longest
+    condition the API words. Both are inside a budget rather than measured
     at draw time, and a budget that is never checked is a budget that has
     already been broken once.
     """
@@ -2024,14 +1524,9 @@ def check_widths():
             cell = (WIDTH - RIGHT_X) / 2 - METRIC_PAD_L - METRIC_PAD_R
             assert label <= cell, f"{units} {key} overflows: {label:.0f} px"
 
-    headline = text_width(
-        "Snowfall warning", semibold(SIZE_HEADLINE), TRACK_HEADLINE,
-    )
+    # The longest condition the Tempest API words, which a quiet panel
+    # carries as its headline.
     budget = RIGHT_X1 - RIGHT_X0 - NEXT_GLYPH_COL
-    assert headline <= budget, f"headline overflows: {headline:.0f} px of {budget}"
-
-    # The longest condition the Tempest API words, now that a quiet panel
-    # carries the condition as its headline.
     condition = text_width(
         "Thunderstorms possible", semibold(SIZE_HEADLINE), TRACK_HEADLINE,
     )
@@ -2071,9 +1566,7 @@ def flatten_text_edges(img):
     orange, so black type on white picks up a coloured fringe that is very
     visible at 182 px. Type on this panel is only ever black or white, so
     any near-neutral pixel is a text edge and is resolved to one or the
-    other. Coloured fills are left alone: they are not neutral, and the
-    edge between black type and a severity field quantises correctly on its
-    own.
+    other. Coloured fills are left alone: they are not neutral.
     """
     red, green, blue = img.split()
     brightest = ImageChops.lighter(ImageChops.lighter(red, green), blue)
@@ -2111,51 +1604,6 @@ def refresh_interval_minutes(weather):
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
-def check_alerts():
-    """Print what the alert feed resolves to, and what it currently returns.
-
-    The alert path is silent by design — a failure is "no alert" — so this
-    is how you tell "nothing is happening" apart from "nothing is wired up".
-    """
-    location = load_location_config()
-    lat, lon, tz_name = location["lat"], location["lon"], None
-
-    # The UK feed is regional, not point-based, so it needs no coordinates.
-    needs_point = location["region"] != "uk" and (lat is None or lon is None)
-    if needs_point or location["region"] == "auto":
-        print("Reading station location from the Tempest API...")
-        session = requests.Session()
-        found_lat, found_lon, tz_name = fetch_station_location(session)
-        lat = lat if lat is not None else found_lat
-        lon = lon if lon is not None else found_lon
-
-    region = location["region"]
-    source = "configured"
-    if region == "auto":
-        region = detect_region(tz_name, lat, lon)
-        source = "auto-detected"
-
-    print(f"  Coordinates : {lat}, {lon}")
-    print(f"  Timezone    : {tz_name or 'unknown'}")
-    print(f"  Region      : {region or 'none'} ({source})")
-    if region == "uk":
-        area = location["area"]
-        print(f"  Met Office  : {area} — {UK_REGIONS.get(area, 'UNKNOWN REGION CODE')}")
-
-    if not region or region == "none":
-        print("\nAlerts are off. Set ALERT_REGION to ca, us or uk in ~/secrets.py.")
-        return
-
-    alert = resolve_alert(region, lat, lon, location["area"])
-    if alert is None:
-        print("\nNo alert active for this location right now.")
-    else:
-        print(f"\n  {alert['severity'].upper()}: {alert['event']}")
-        print(f"  Area    : {alert.get('area') or 'unspecified'}")
-        print(f"  Until   : {hhmm(alert.get('expires'))}")
-        print(f"  Beacon  : {SEVERITY_COLOUR_NAME[alert['severity']]}")
-
-
 # ── Canned scenarios ──────────────────────────────────────────────────────────
 # The five states from the design file, so every one can be checked without
 # waiting for the weather. These never touch the network.
@@ -2174,7 +1622,6 @@ SCENARIOS = {
         "temp": 21.8, "feels": 24.4, "high": 30.0, "low": 18.0, "dew": 18.0,
         "icon": "partly", "conditions": "Partly Cloudy",
         "wind": 0.0, "rain": 0.0, "pressure": 1021.0, "daylight": "13h56",
-        "alert": None,
         "hours": [("partly", 24.0, 5), ("clear", 24.0, 0),
                   ("partly", 22.0, 0), ("cloud", 21.0, 10)],
         "days": [("clear", 30.0), ("clear", 31.0), ("clear", 28.0),
@@ -2184,7 +1631,6 @@ SCENARIOS = {
         "temp": 25.4, "feels": 27.1, "high": 26.0, "low": 17.0, "dew": 19.0,
         "icon": "storm", "conditions": "thunderstorms",
         "wind": 34.0, "rain": 4.2, "pressure": 998.0, "daylight": "15h12",
-        "alert": {"severity": "watch", "event": "Storm watch", "area": "", "hours": 4},
         "hours": [("cloud", 25.0, 30), ("rain", 24.0, 70),
                   ("rain", 22.0, 80), ("storm", 21.0, 90)],
         "days": [("storm", 24.0), ("rain", 26.0), ("rain", 22.0),
@@ -2194,8 +1640,6 @@ SCENARIOS = {
         "temp": -9.2, "feels": -14.3, "high": -8.0, "low": -17.0, "dew": -13.0,
         "icon": "snow", "conditions": "snow all day",
         "wind": 41.0, "rain": 0.0, "pressure": 994.0, "daylight": "8h36",
-        "alert": {"severity": "warning", "event": "Snowfall warning",
-                  "area": "", "hours": 14},
         "hours": [("cloud", -9.0, 20), ("snow", -10.0, 80),
                   ("snow", -12.0, 90), ("snow", -13.0, 90)],
         "days": [("snow", -8.0), ("snow", -11.0), ("cloud", -11.0),
@@ -2205,7 +1649,6 @@ SCENARIOS = {
         "temp": 11.3, "feels": 9.4, "high": 13.0, "low": 8.0, "dew": 10.0,
         "icon": "rain", "conditions": "rain easing this evening",
         "wind": 22.0, "rain": 12.6, "pressure": 1002.0, "daylight": "11h08",
-        "alert": None,
         "hours": [("rain", 11.0, 90), ("rain", 11.0, 90),
                   ("rain", 10.0, 80), ("cloud", 10.0, 20)],
         "days": [("rain", 12.0), ("rain", 11.0), ("cloud", 13.0),
@@ -2215,8 +1658,6 @@ SCENARIOS = {
         "temp": 33.4, "feels": 36.2, "high": 34.0, "low": 21.0, "dew": 20.0,
         "icon": "clear", "conditions": "clear and very hot",
         "wind": 8.0, "rain": 0.0, "pressure": 1018.0, "daylight": "15h44",
-        "alert": {"severity": "advisory", "event": "Heat advisory",
-                  "area": "", "hours": 5},
         "hours": [("clear", 33.0, 0), ("clear", 32.0, 0),
                   ("clear", 30.0, 0), ("partly", 28.0, 0)],
         "days": [("clear", 33.0), ("clear", 34.0), ("clear", 35.0),
@@ -2235,11 +1676,6 @@ def scenario_weather(name):
 
     hours, minutes = spec["daylight"].split("h")
     daylight = int(hours) * 3600 + int(minutes) * 60
-
-    alert = None
-    if spec["alert"]:
-        alert = dict(spec["alert"])
-        alert["expires"] = now + alert.pop("hours") * 3600
 
     return {
         "temp": spec["temp"],
@@ -2285,7 +1721,6 @@ def scenario_weather(name):
             }
             for i, (cat, temp, prob) in enumerate(spec["hours"])
         ],
-        "alert": alert,
         "fetched_at": now,
     }
 
@@ -2316,16 +1751,7 @@ def main():
              "instead of fetching, so every state can be checked without "
              "waiting for the weather.",
     )
-    parser.add_argument(
-        "--check-alerts", action="store_true",
-        help="Report which alert feed this station resolves to and what it "
-             "returns right now, then exit.",
-    )
     args = parser.parse_args()
-
-    if args.check_alerts:
-        check_alerts()
-        return
 
     # A preview or a scenario is a rendering job, not a refresh: it neither
     # consults the schedule nor moves it on.
