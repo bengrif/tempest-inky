@@ -1449,9 +1449,8 @@ def metric_values(weather):
     always in the position you last found it. A cell with no data renders
     an em dash — it does not vanish and it is not reordered.
 
-    Units live in the label, never in the value. A cell is only ~217 px
-    wide and a value with its unit beside `13h 56m` collides; that was
-    measured, not preferred.
+    Units live in the label, never in the value, so the value keeps its full
+    size: a cell is only ~217 px wide.
 
     UPDATED is when the figures on the panel were fetched. The panel only
     repaints when the displayed temperature changes, so this is also the
@@ -1459,18 +1458,11 @@ def metric_values(weather):
     temperature has held, not that the panel has stopped. The NEXT zone
     separately flags a station that has stopped reporting.
     """
-    sunrise, sunset = weather.get("sunrise"), weather.get("sunset")
-    if sunrise and sunset and sunset > sunrise:
-        total = int(sunset - sunrise)
-        daylight = f"{total // 3600}h{(total % 3600) // 60:02d}"
-    else:
-        daylight = DASH
-
     return [
         {"label": unit_text("wind_label"), "value": fmt_speed(weather.get("wind_avg"))},
         {"label": "UPDATED", "value": hhmm(weather.get("fetched_at"))},
         {"label": unit_text("rain_label"), "value": fmt_rain(weather.get("rain_today"))},
-        {"label": "DAYLIGHT", "value": daylight},
+        {"label": "HUMIDITY %", "value": fmt_num(weather.get("humidity"))},
     ]
 
 
