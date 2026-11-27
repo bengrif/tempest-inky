@@ -486,7 +486,7 @@ def fmt_temp(value, decimals=0):
     return f"{_rounded(value, decimals)}°"
 
 
-def fmt_speed(kph, decimals=0):
+def fmt_speed(kph, decimals=1):
     if kph is not None and imperial():
         kph = kph / KM_PER_MILE
     return fmt_num(kph, decimals)
