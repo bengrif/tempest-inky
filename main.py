@@ -811,6 +811,17 @@ UNIT_PARAMS = {
 }
 
 
+# The station observations endpoint ignores the units_* parameters and always
+# reports wind in metres per second; only better_forecast honours them.
+KPH_PER_MPS = 3.6
+
+
+def obs_wind_kph(value):
+    """An observed wind speed, from the endpoint's m/s to the payload's km/h."""
+    mps = _num(value)
+    return None if mps is None else mps * KPH_PER_MPS
+
+
 def forecast_unit_params():
     """The forecast request's units: Fahrenheit when the panel shows it.
 
@@ -926,8 +937,8 @@ def fetch_weather(retries=3):
                 "today_low": forecast_temp(daily[0].get("air_temp_low")),
                 "today_conditions": daily[0].get("conditions", ""),
                 "dew_point": _num(obs.get("dew_point")),
-                "wind_avg": _num(obs.get("wind_avg")),
-                "wind_gust": _num(obs.get("wind_gust")),
+                "wind_avg": obs_wind_kph(obs.get("wind_avg")),
+                "wind_gust": obs_wind_kph(obs.get("wind_gust")),
                 "wind_dir": _num(obs.get("wind_direction")),
                 "pressure": _num(obs.get("sea_level_pressure")),
                 "pressure_trend": (current.get("pressure_trend") or "steady").lower(),
